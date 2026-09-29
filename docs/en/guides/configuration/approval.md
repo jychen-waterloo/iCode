@@ -45,6 +45,10 @@ Tool calls that require approval open an **Approval Required** dialog showing th
 
 ## Understand automatic approval and safety protections
 
+When minimal DAA is enabled, editing a request approves that edit once and does not save the original request as a reusable grant. The edited arguments run through `before_tool_call` hooks. If a hook changes them further, iCode asks you to confirm the resulting request without running the same transformation again. Arguments outside DAA's supported JSON identity format use ordinary per-call approval and cannot reuse or create a DAA grant.
+
+Session-scoped DAA grants follow the session ID and survive an agent rebuild or restoration of that same session. A different session does not inherit them. Historical session grants are currently retained in the DAA store; closing an approval dialog or rebuilding an agent does not delete them.
+
 The following operations usually run without an approval dialog:
 
 - Safe, read-only Shell commands that do not access sensitive targets, such as `ls`, `cat`, and `grep`.

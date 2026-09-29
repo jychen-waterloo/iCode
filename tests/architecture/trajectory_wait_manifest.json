@@ -1,5 +1,5 @@
 {
-  "inventory_sha256": "985378d4dbb7b40a0fdfdc1bc0d4da5964e4c5e5f1eb7d4ca7cb60db8e5ca01a",
+  "inventory_sha256": "6e3cd72e3ab17eb96c9886eae0ad06cad500d9d70f38dd64da615ddb2abd2fc3",
   "nodes": [
     {
       "cases": [
@@ -33678,7 +33678,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._ensure_auto_fulfill_block_subscription",
       "source_column": 8,
-      "source_line": 789,
+      "source_line": 819,
       "wrapper_target": null
     },
     {
@@ -33698,7 +33698,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 12,
-      "source_line": 374,
+      "source_line": 386,
       "wrapper_target": null
     },
     {
@@ -33718,7 +33718,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 20,
-      "source_line": 397,
+      "source_line": 409,
       "wrapper_target": null
     },
     {
@@ -33738,7 +33738,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 418,
+      "source_line": 430,
       "wrapper_target": null
     },
     {
@@ -33758,7 +33758,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 452,
+      "source_line": 464,
       "wrapper_target": null
     },
     {
@@ -33778,7 +33778,27 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 12,
-      "source_line": 466,
+      "source_line": 478,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await asyncio.to_thread(self._daa.service.match, daa_candidate)",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:6",
+      "module": "chrys.service.agent_middleware.control.approval",
+      "ordinal": 6,
+      "primitive": "thread_pool",
+      "qualname": "ApprovalMiddleware._process",
+      "source_column": 26,
+      "source_line": 541,
       "wrapper_target": null
     },
     {
@@ -33792,13 +33812,13 @@
         }
       ],
       "expression": "await call_next()",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:6",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:7",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 6,
+      "ordinal": 7,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 506,
+      "source_line": 558,
       "wrapper_target": null
     },
     {
@@ -33812,13 +33832,13 @@
         }
       ],
       "expression": "async with OneShotCorrelation(self._bus, ApprovalResponse, request_id=request_id, snapshot=deepcopy if self._daa is not None else None)",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:7",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:8",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 7,
+      "ordinal": 8,
       "primitive": "async_context",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 23,
-      "source_line": 564,
+      "source_line": 586,
       "wrapper_target": null
     },
     {
@@ -33832,13 +33852,13 @@
         }
       ],
       "expression": "await self._ensure_auto_fulfill_block_subscription()",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:8",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:9",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 8,
+      "ordinal": 9,
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 24,
-      "source_line": 583,
+      "source_line": 605,
       "wrapper_target": "chrys.service.agent_middleware.control.approval.ApprovalMiddleware._ensure_auto_fulfill_block_subscription"
     },
     {
@@ -33852,13 +33872,13 @@
         }
       ],
       "expression": "await self._bus.publish(ApprovalRequest(request_id=request_id, call_id=call_id, tool_name=tool_name, tool_kind=tool_kind, args=deepcopy(parsed_args) if self._daa is not None else parsed_args, session_id=self._session_id, caller_name=self._caller_name, user_message=self._user_message, workspace_roots=list(self._workspace_roots), workspace_cwd=self._workspace_cwd or '', judging=judging, daa_exact=daa_candidate.display if daa_candidate is not None else '', daa_prefix=daa_candidate.prefix or () if daa_candidate is not None else ()))",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:9",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:10",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 9,
+      "ordinal": 10,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 20,
-      "source_line": 587,
+      "source_line": 609,
       "wrapper_target": null
     },
     {
@@ -33872,13 +33892,13 @@
         }
       ],
       "expression": "await approval_trace.requested(tool_name=tool_name, approval_mode=self._approval_mode.value, approval_level=_approval_level(policy=policy_requires_approval, dev_sub_agent_review=dev_sub_agent_review, sensitive=sensitive_shell or sensitive_filesystem_read or sensitive_filesystem_write))",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:10",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:11",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 10,
+      "ordinal": 11,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 24,
-      "source_line": 643,
+      "source_line": 665,
       "wrapper_target": null
     },
     {
@@ -33892,13 +33912,13 @@
         }
       ],
       "expression": "await await_approval_with_hooks(future=future, judge_task=judge_task, manager=self._hook_manager, session_id=self._session_id, profile_name=self._profile_name, workspace_cwd=self._workspace_cwd or '', caller_name=self._caller_name, request_id=request_id, tool_name=tool_name, tool_kind=tool_kind, call_id=call_id, args=parsed_args, target_operation_id=approval_trace.request_id if approval_trace is not None else None)",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:11",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:12",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 11,
+      "ordinal": 12,
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 31,
-      "source_line": 652,
+      "source_line": 674,
       "wrapper_target": "chrys.service.agent_middleware.control.approval_hooks.await_approval_with_hooks"
     },
     {
@@ -33912,13 +33932,13 @@
         }
       ],
       "expression": "await judge_task",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:12",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:13",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 12,
+      "ordinal": 13,
       "primitive": "future",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 28,
-      "source_line": 674,
+      "source_line": 696,
       "wrapper_target": null
     },
     {
@@ -33932,13 +33952,13 @@
         }
       ],
       "expression": "await approval_trace.resolved(approved=approved, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='user_reason' if reason else '', arguments_modified=bool(modified_args), judge_audit=judge_audit)",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:13",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:14",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 13,
+      "ordinal": 14,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 688,
+      "source_line": 710,
       "wrapper_target": null
     },
     {
@@ -33952,13 +33972,13 @@
         }
       ],
       "expression": "await apply_before_tool_hooks(manager=self._hook_manager, context=context, session_id=self._session_id, profile_name=self._profile_name, tool_name=tool_name, kind=tool_kind, call_id=call_id, args=context.arguments, workspace_cwd=self._workspace_cwd or '', target_operation_id=tool_operation_id(context.metadata))",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:14",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:15",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 14,
+      "ordinal": 15,
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 31,
-      "source_line": 717,
+      "source_line": 739,
       "wrapper_target": "chrys.service.agent_middleware.events.hook_dispatch.apply_before_tool_hooks"
     },
     {
@@ -33972,13 +33992,33 @@
         }
       ],
       "expression": "await publisher.publish(InvocationToolCallArgsUpdated(origin=publisher.origin, agent_name=self._caller_name, tool_name=tool_name, tool_kind=tool_kind, call_id=call_id, args=final_args, session_id=self._session_id))",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:15",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:16",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 15,
+      "ordinal": 16,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 20,
-      "source_line": 738,
+      "source_line": 761,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await asyncio.to_thread(self._daa.service.remember, daa_candidate, daa_choice)",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:17",
+      "module": "chrys.service.agent_middleware.control.approval",
+      "ordinal": 17,
+      "primitive": "thread_pool",
+      "qualname": "ApprovalMiddleware._process",
+      "source_column": 16,
+      "source_line": 797,
       "wrapper_target": null
     },
     {
@@ -33992,13 +34032,13 @@
         }
       ],
       "expression": "await call_next()",
-      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:16",
+      "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware._process:18",
       "module": "chrys.service.agent_middleware.control.approval",
-      "ordinal": 16,
+      "ordinal": 18,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 12,
-      "source_line": 771,
+      "source_line": 801,
       "wrapper_target": null
     },
     {
@@ -34018,7 +34058,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.close",
       "source_column": 8,
-      "source_line": 793,
+      "source_line": 823,
       "wrapper_target": null
     },
     {
@@ -34037,8 +34077,8 @@
       "ordinal": 1,
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
-      "source_column": 14,
-      "source_line": 319,
+      "source_column": 23,
+      "source_line": 327,
       "wrapper_target": "chrys.service.agent_middleware.control.approval.ApprovalMiddleware._process"
     },
     {
@@ -34058,7 +34098,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 15,
-      "source_line": 323,
+      "source_line": 335,
       "wrapper_target": "chrys.service.agent_middleware.events.hook_dispatch.apply_before_tool_hooks"
     },
     {

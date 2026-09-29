@@ -11,7 +11,7 @@ import os
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 from uuid import uuid4
 
 from chrys.foundation.events.types import (
@@ -71,6 +71,14 @@ if TYPE_CHECKING:
     from chrys.service.approval.policy import ApprovalPolicy
     from chrys.service.approval.turn_context import TurnContextHolder
     from chrys.service.hooks.manager import HookManager
+
+
+def _daa_argument_snapshot(arguments: object) -> str | None:
+    """Unsupported identities use ordinary approval and cannot reuse a grant."""
+    try:
+        return canonical(arguments)
+    except ValueError, TypeError, RecursionError:
+        return None
 
 
 def _path_is_at_or_under(path: str, parent: str) -> bool:
@@ -316,8 +324,12 @@ class ApprovalMiddleware(FunctionMiddleware):
         call_next: Callable[[], Awaitable[None]],
     ) -> None:
         reapprove = False
-        while await self._process(context, call_next, reapprove=reapprove):
+        while retry := await self._process(context, call_next, reapprove=reapprove):
             reapprove = True
+            if retry == "reapprove":
+                # The UI-edit path already ran hooks on this request. A hook
+                # rewrite needs confirmation, not a second transformation.
+                continue
             # The upstream hook saw the old request. Check the changed request
             # before presenting it again, just as for an explicit UI edit.
             if await apply_before_tool_hooks(
@@ -340,7 +352,7 @@ class ApprovalMiddleware(FunctionMiddleware):
         call_next: Callable[[], Awaitable[None]],
         *,
         reapprove: bool,
-    ) -> bool:
+    ) -> Literal[False, "rehook", "reapprove"]:
         must_ask_human = self._daa is not None and bool(context.metadata.get("daa_must_ask_human"))
         publisher = self._publisher
         tool_name = context.function.name
@@ -483,34 +495,11 @@ class ApprovalMiddleware(FunctionMiddleware):
         # branches above without copying or coercing their result.
         parsed_args = cast("dict[str, Any]", parsed_args)
 
-        daa_candidate = None
-        if self._daa is not None:
-            daa_candidate = self._daa.candidate(
-                context,
-                must_ask_human=must_ask_human,
-                non_reusable=dev_sub_agent_review
-                or sensitive_shell
-                or sensitive_filesystem_read
-                or sensitive_filesystem_write,
-            )
-            if not reapprove and self._daa.service.match(daa_candidate) == "HIT_ALLOW":
-                self._decisions.append(
-                    _decision(
-                        request_id="",
-                        tool_name=tool_name,
-                        status="daa_approved",
-                        call_id=call_id,
-                        tool_order=tool_order,
-                    )
-                )
-                await call_next()
-                return False
-
         if self._daa is not None:
             # DAA-only confirmation snapshot, never a future reuse key. Keep
             # ordinary approval free of serialization and tool identity checks.
             parsed_args = deepcopy(parsed_args)
-            confirmed_arguments = canonical(context.arguments)
+            confirmed_arguments = _daa_argument_snapshot(context.arguments)
             confirmed_function = (context.function, context.function.name, context.function.func)
 
             # Copy structured values, keeping opaque host handles (including the
@@ -527,14 +516,47 @@ class ApprovalMiddleware(FunctionMiddleware):
             confirmed_kwargs = snapshot_kwargs(context.kwargs)
             confirmed_flags = (context.metadata.get("daa_must_ask_human"), context.metadata.get("daa_non_reusable"))
 
-            def request_changed() -> bool:
+            def request_identity_changed() -> bool:
                 return (
-                    canonical(context.arguments) != confirmed_arguments
-                    or (context.function, context.function.name, context.function.func) != confirmed_function
+                    (context.function, context.function.name, context.function.func) != confirmed_function
                     or context.kwargs != confirmed_kwargs
                     or (context.metadata.get("daa_must_ask_human"), context.metadata.get("daa_non_reusable"))
                     != confirmed_flags
                 )
+
+            def request_changed() -> bool:
+                return _daa_argument_snapshot(context.arguments) != confirmed_arguments or request_identity_changed()
+
+        daa_candidate = None
+        if self._daa is not None and confirmed_arguments is not None:
+            daa_candidate = self._daa.candidate(
+                context,
+                must_ask_human=must_ask_human,
+                non_reusable=dev_sub_agent_review
+                or sensitive_shell
+                or sensitive_filesystem_read
+                or sensitive_filesystem_write,
+            )
+            if not reapprove and daa_candidate is not None:
+                matched = await asyncio.to_thread(self._daa.service.match, daa_candidate)
+                # A worker lookup yields the event loop. The grant must still
+                # describe the live request when execution resumes.
+                if request_changed():
+                    return "rehook"
+            else:
+                matched = "MISS"
+            if matched == "HIT_ALLOW":
+                self._decisions.append(
+                    _decision(
+                        request_id="",
+                        tool_name=tool_name,
+                        status="daa_approved",
+                        call_id=call_id,
+                        tool_order=tool_order,
+                    )
+                )
+                await call_next()
+                return False
 
         request_id = uuid4().hex[:_SHORT_ID_LEN]
         decision = _decision(
@@ -704,11 +726,11 @@ class ApprovalMiddleware(FunctionMiddleware):
                 # Only the confirmation of the actual request belongs in the
                 # persisted tool decision; a stale approval must not win by ID.
                 self._decisions.remove(decision)
-                return True
+                return "rehook"
             if modified_args:
                 context.arguments = {**parsed_args, **modified_args}
                 if self._daa is not None:
-                    confirmed_arguments = canonical(context.arguments)
+                    confirmed_arguments = _daa_argument_snapshot(context.arguments)
                 # Re-dispatch ``before_tool_call`` hooks with the edited args.
                 # ``ToolEventMiddleware`` already fired hooks once with the
                 # original args before approval ran; without this second pass,
@@ -730,6 +752,7 @@ class ApprovalMiddleware(FunctionMiddleware):
                     target_operation_id=tool_operation_id(context.metadata),
                 )
                 # Hooks may have rewritten args further — capture the final form.
+                hooked_arguments = _daa_argument_snapshot(context.arguments) if self._daa is not None else None
                 final_args = context.arguments if isinstance(context.arguments, dict) else modified_args
                 context.metadata[_APPROVAL_MODIFIED_ARGS_KEY] = final_args
                 if call_id and isinstance(final_args, dict):
@@ -757,7 +780,11 @@ class ApprovalMiddleware(FunctionMiddleware):
                     return False
                 if self._daa is not None and request_changed():
                     self._decisions.remove(decision)
-                    return True
+                    if request_identity_changed() or _daa_argument_snapshot(context.arguments) != hooked_arguments:
+                        # A later event handler changed the request again; that
+                        # new request has not passed before_tool_call hooks.
+                        return "rehook"
+                    return "reapprove"
             if (
                 user_decided
                 and daa_choice
@@ -767,7 +794,10 @@ class ApprovalMiddleware(FunctionMiddleware):
             ):
                 # UI edits are explicit one-time approvals; they never save the
                 # original candidate selected before editing.
-                self._daa.service.remember(daa_candidate, daa_choice)
+                await asyncio.to_thread(self._daa.service.remember, daa_candidate, daa_choice)
+                if request_changed():
+                    self._decisions.remove(decision)
+                    return "rehook"
             await call_next()
         else:
             # Return error result — LLM sees rejection and can respond naturally.
