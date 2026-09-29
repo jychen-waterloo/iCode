@@ -916,6 +916,13 @@ class FilesystemTools:
         """Return filesystem tools for this runtime context."""
         return [self.read_file, self.view_image, self.write_file, self.edit_file]
 
+    def affected_paths(self, arguments: dict[str, object]) -> tuple[str, ...] | None:
+        """Complete write/edit targets, using the same lexical resolver as execution."""
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path or "\0" in path:
+            return None
+        return (resolve_workspace_path(path, base_cwd=self._runtime.cwd),)
+
     @tool(kind=KIND_FILESYSTEM_READ)
     def read_file(
         self,
