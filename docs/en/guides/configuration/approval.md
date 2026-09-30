@@ -20,6 +20,16 @@ The three approval modes behave as follows:
 >
 > **Manual mode does not mean every tool call opens a dialog.** It means that calls requiring approval are decided by the user. Calls that do not require approval or qualify for automatic approval run directly. See [Understand automatic approval and safety protections](#understand-automatic-approval-and-safety-protections).
 
+## Optional Formal evaluation
+
+Set `formal_enabled: true` on the selected approval-judge model profile to enable two-stage review. That profile (ordinary LLM or Jev) evaluates all seven packaged predicates in one request, including their complete definitions, examples and exceptions. Each ID must return JSON `true`, `false`, or `"unknown"`; unknown means insufficient input. Missing, duplicate or extra IDs and malformed responses are retried, never converted to unknown.
+
+Any `true` keeps the existing human approval dialog open without calling the second stage. With no true (all false, mixed false/unknown, or all unknown), the second stage uses iCode's existing approval prompt and the main agent's configured model. Configure that main model as the reasoning LLM you want, with its usual reasoning/chat options; Jev cannot be the second-stage chat model. Workflow nodes use their effective agent model, falling back to the run model. Only a second-stage `approved: true` automatically approves.
+
+Predicates are independent: an explicitly requested `git push` still has `external_action=true`, although `scope_escalation` may be false, so Formal requires human approval. Both stages and retries share the approval-judge profile's total timeout. Asset/model errors and exhausted retries require human handling; cancellation stays cancellation. Existing audit records include stages, predicate values, model profiles and call counts.
+
+`formal_enabled: false` keeps the original Direct behavior. Read-only fast paths and approval priority are unchanged; these rules apply only to calls that reach Formal.
+
 ## Switch approval modes in the TUI
 
 Use either of these methods to switch the current approval mode in the TUI:

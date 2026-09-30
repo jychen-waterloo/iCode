@@ -1,5 +1,5 @@
 {
-  "inventory_sha256": "1ce584421bfa4e0290eea7912fd776491f37800616ea3c5717c2d798dc63e195",
+  "inventory_sha256": "c22e3d419eb08401a1208009a6746d7c43caaefc6553c2d7dc331ba819bd28d6",
   "nodes": [
     {
       "cases": [
@@ -5158,7 +5158,7 @@
       "primitive": "awaitable",
       "qualname": "build_agent",
       "source_column": 17,
-      "source_line": 306,
+      "source_line": 307,
       "wrapper_target": null
     },
     {
@@ -5178,7 +5178,7 @@
       "primitive": "wrapper",
       "qualname": "build_agent",
       "source_column": 16,
-      "source_line": 398,
+      "source_line": 399,
       "wrapper_target": "chrys.orchestration.engine.build.construction._close_coordinator"
     },
     {
@@ -5198,7 +5198,7 @@
       "primitive": "wrapper",
       "qualname": "build_agent",
       "source_column": 16,
-      "source_line": 403,
+      "source_line": 404,
       "wrapper_target": "chrys.orchestration.invoker.resources.rollback_resources"
     },
     {
@@ -18398,7 +18398,7 @@
       "primitive": "async_context",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 19,
-      "source_line": 812,
+      "source_line": 829,
       "wrapper_target": null
     },
     {
@@ -18418,7 +18418,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 20,
-      "source_line": 823,
+      "source_line": 840,
       "wrapper_target": null
     },
     {
@@ -18438,7 +18438,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 20,
-      "source_line": 825,
+      "source_line": 842,
       "wrapper_target": null
     },
     {
@@ -18458,7 +18458,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 16,
-      "source_line": 831,
+      "source_line": 848,
       "wrapper_target": null
     },
     {
@@ -18478,7 +18478,7 @@
       "primitive": "wrapper",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 20,
-      "source_line": 857,
+      "source_line": 874,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpPermissionBroker._publish_initial_dialog_cleanup"
     },
     {
@@ -18498,7 +18498,7 @@
       "primitive": "future",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 27,
-      "source_line": 896,
+      "source_line": 914,
       "wrapper_target": null
     },
     {
@@ -18518,7 +18518,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 20,
-      "source_line": 902,
+      "source_line": 920,
       "wrapper_target": null
     },
     {
@@ -18538,7 +18538,7 @@
       "primitive": "future",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 24,
-      "source_line": 909,
+      "source_line": 927,
       "wrapper_target": null
     },
     {
@@ -18558,7 +18558,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 16,
-      "source_line": 924,
+      "source_line": 942,
       "wrapper_target": null
     },
     {
@@ -18578,7 +18578,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker._decide_permission",
       "source_column": 12,
-      "source_line": 932,
+      "source_line": 950,
       "wrapper_target": null
     },
     {
@@ -18598,7 +18598,7 @@
       "primitive": "wrapper",
       "qualname": "AcpPermissionBroker._publish_initial_dialog_cleanup",
       "source_column": 12,
-      "source_line": 1043,
+      "source_line": 1061,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.drain_acp_task"
     },
     {
@@ -18618,7 +18618,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.cancel_pending_waits",
       "source_column": 12,
-      "source_line": 1053,
+      "source_line": 1071,
       "wrapper_target": null
     },
     {
@@ -18638,7 +18638,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.cancel_pending_waits",
       "source_column": 12,
-      "source_line": 1059,
+      "source_line": 1077,
       "wrapper_target": null
     },
     {
@@ -18658,7 +18658,7 @@
       "primitive": "wrapper",
       "qualname": "AcpPermissionBroker.close",
       "source_column": 8,
-      "source_line": 1062,
+      "source_line": 1080,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpPermissionBroker.cancel_pending_waits"
     },
     {
@@ -18678,7 +18678,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.close",
       "source_column": 8,
-      "source_line": 1063,
+      "source_line": 1081,
       "wrapper_target": null
     },
     {
@@ -18698,7 +18698,7 @@
       "primitive": "async_context",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 19,
-      "source_line": 965,
+      "source_line": 983,
       "wrapper_target": null
     },
     {
@@ -18718,7 +18718,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 20,
-      "source_line": 970,
+      "source_line": 988,
       "wrapper_target": null
     },
     {
@@ -18738,7 +18738,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 16,
-      "source_line": 972,
+      "source_line": 990,
       "wrapper_target": null
     },
     {
@@ -18758,7 +18758,7 @@
       "primitive": "wrapper",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 20,
-      "source_line": 985,
+      "source_line": 1003,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpPermissionBroker._publish_initial_dialog_cleanup"
     },
     {
@@ -18778,7 +18778,7 @@
       "primitive": "future",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 31,
-      "source_line": 996,
+      "source_line": 1014,
       "wrapper_target": null
     },
     {
@@ -18798,7 +18798,7 @@
       "primitive": "timeout",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 31,
-      "source_line": 998,
+      "source_line": 1016,
       "wrapper_target": null
     },
     {
@@ -18818,7 +18818,7 @@
       "primitive": "future",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 35,
-      "source_line": 999,
+      "source_line": 1017,
       "wrapper_target": null
     },
     {
@@ -18838,7 +18838,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 16,
-      "source_line": 1003,
+      "source_line": 1021,
       "wrapper_target": null
     },
     {
@@ -18858,7 +18858,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 20,
-      "source_line": 1010,
+      "source_line": 1028,
       "wrapper_target": null
     },
     {
@@ -18878,7 +18878,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 16,
-      "source_line": 1024,
+      "source_line": 1042,
       "wrapper_target": null
     },
     {
@@ -18898,7 +18898,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_ext_method",
       "source_column": 12,
-      "source_line": 1027,
+      "source_line": 1045,
       "wrapper_target": null
     },
     {
@@ -18918,7 +18918,7 @@
       "primitive": "wrapper",
       "qualname": "AcpPermissionBroker.on_permission_request",
       "source_column": 23,
-      "source_line": 773,
+      "source_line": 786,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpPermissionBroker._decide_permission"
     },
     {
@@ -18938,7 +18938,7 @@
       "primitive": "awaitable",
       "qualname": "AcpPermissionBroker.on_update",
       "source_column": 12,
-      "source_line": 761,
+      "source_line": 774,
       "wrapper_target": null
     },
     {
@@ -18958,7 +18958,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator._consume_message",
       "source_column": 12,
-      "source_line": 606,
+      "source_line": 619,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator._seal_segment"
     },
     {
@@ -18978,7 +18978,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator._merge_tool",
       "source_column": 8,
-      "source_line": 508,
+      "source_line": 521,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator._publish_start"
     },
     {
@@ -18998,7 +18998,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator._merge_tool",
       "source_column": 12,
-      "source_line": 510,
+      "source_line": 523,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator._publish_terminal"
     },
     {
@@ -19018,7 +19018,7 @@
       "primitive": "awaitable",
       "qualname": "AcpUpdateTranslator._publish_start",
       "source_column": 12,
-      "source_line": 526,
+      "source_line": 539,
       "wrapper_target": null
     },
     {
@@ -19038,7 +19038,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator._publish_terminal",
       "source_column": 12,
-      "source_line": 557,
+      "source_line": 570,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator._publish_start"
     },
     {
@@ -19058,7 +19058,7 @@
       "primitive": "awaitable",
       "qualname": "AcpUpdateTranslator._publish_terminal",
       "source_column": 16,
-      "source_line": 570,
+      "source_line": 583,
       "wrapper_target": null
     },
     {
@@ -19078,7 +19078,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator._publish_terminal",
       "source_column": 8,
-      "source_line": 597,
+      "source_line": 610,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator.publish_progress"
     },
     {
@@ -19098,7 +19098,7 @@
       "primitive": "awaitable",
       "qualname": "AcpUpdateTranslator._seal_segment",
       "source_column": 12,
-      "source_line": 624,
+      "source_line": 637,
       "wrapper_target": null
     },
     {
@@ -19118,7 +19118,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator.finalize_usage",
       "source_column": 8,
-      "source_line": 665,
+      "source_line": 678,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator.publish_progress"
     },
     {
@@ -19138,7 +19138,7 @@
       "primitive": "wrapper",
       "qualname": "AcpUpdateTranslator.flush_interrupted",
       "source_column": 16,
-      "source_line": 602,
+      "source_line": 615,
       "wrapper_target": "chrys.orchestration.invoker.acp_protocol.AcpUpdateTranslator._publish_terminal"
     },
     {
@@ -19238,7 +19238,7 @@
       "primitive": "awaitable",
       "qualname": "AcpUpdateTranslator.publish_progress",
       "source_column": 12,
-      "source_line": 669,
+      "source_line": 682,
       "wrapper_target": null
     },
     {
@@ -19278,7 +19278,7 @@
       "primitive": "shield",
       "qualname": "drain_acp_task",
       "source_column": 12,
-      "source_line": 1110,
+      "source_line": 1128,
       "wrapper_target": null
     },
     {
@@ -29938,7 +29938,7 @@
       "primitive": "thread_pool",
       "qualname": "WorkflowSessionOwner._acquire_guard",
       "source_column": 15,
-      "source_line": 367,
+      "source_line": 370,
       "wrapper_target": null
     },
     {
@@ -29958,7 +29958,7 @@
       "primitive": "awaitable",
       "qualname": "WorkflowSessionOwner._close_hooks",
       "source_column": 12,
-      "source_line": 379,
+      "source_line": 382,
       "wrapper_target": null
     },
     {
@@ -29978,7 +29978,7 @@
       "primitive": "thread_pool",
       "qualname": "WorkflowSessionOwner._close_mutations",
       "source_column": 12,
-      "source_line": 383,
+      "source_line": 386,
       "wrapper_target": null
     },
     {
@@ -29998,7 +29998,7 @@
       "primitive": "awaitable",
       "qualname": "WorkflowSessionOwner._close_trajectory",
       "source_column": 12,
-      "source_line": 375,
+      "source_line": 378,
       "wrapper_target": null
     },
     {
@@ -30018,7 +30018,7 @@
       "primitive": "sync_primitive",
       "qualname": "WorkflowSessionOwner._discard_admission",
       "source_column": 19,
-      "source_line": 355,
+      "source_line": 358,
       "wrapper_target": null
     },
     {
@@ -30038,7 +30038,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner._discard_admission",
       "source_column": 16,
-      "source_line": 360,
+      "source_line": 363,
       "wrapper_target": "chrys.orchestration.workflows.session.WorkflowSessionOwner._write_state"
     },
     {
@@ -30138,7 +30138,7 @@
       "primitive": "sync_primitive",
       "qualname": "WorkflowSessionOwner._save",
       "source_column": 19,
-      "source_line": 326,
+      "source_line": 329,
       "wrapper_target": null
     },
     {
@@ -30158,7 +30158,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner._save",
       "source_column": 12,
-      "source_line": 333,
+      "source_line": 336,
       "wrapper_target": "chrys.orchestration.workflows.session.WorkflowSessionOwner._write_state"
     },
     {
@@ -30178,7 +30178,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner._save_mutations",
       "source_column": 8,
-      "source_line": 319,
+      "source_line": 322,
       "wrapper_target": "chrys.orchestration.workflows.session.WorkflowSessionOwner._write_state"
     },
     {
@@ -30198,7 +30198,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner._set_model",
       "source_column": 8,
-      "source_line": 308,
+      "source_line": 311,
       "wrapper_target": "chrys.orchestration.workflows.session.WorkflowSessionOwner._write_state"
     },
     {
@@ -30218,7 +30218,7 @@
       "primitive": "awaitable",
       "qualname": "WorkflowSessionOwner._write_state",
       "source_column": 8,
-      "source_line": 344,
+      "source_line": 347,
       "wrapper_target": null
     },
     {
@@ -30238,7 +30238,7 @@
       "primitive": "awaitable",
       "qualname": "WorkflowSessionOwner.checkpoint",
       "source_column": 12,
-      "source_line": 278,
+      "source_line": 281,
       "wrapper_target": null
     },
     {
@@ -30258,7 +30258,7 @@
       "primitive": "awaitable",
       "qualname": "WorkflowSessionOwner.checkpoint",
       "source_column": 8,
-      "source_line": 279,
+      "source_line": 282,
       "wrapper_target": null
     },
     {
@@ -30278,7 +30278,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner.checkpoint",
       "source_column": 8,
-      "source_line": 280,
+      "source_line": 283,
       "wrapper_target": "chrys.orchestration.workflows.session.WorkflowSessionOwner.save"
     },
     {
@@ -30298,7 +30298,7 @@
       "primitive": "sync_primitive",
       "qualname": "WorkflowSessionOwner.close",
       "source_column": 19,
-      "source_line": 386,
+      "source_line": 389,
       "wrapper_target": null
     },
     {
@@ -30318,7 +30318,7 @@
       "primitive": "awaitable",
       "qualname": "WorkflowSessionOwner.close",
       "source_column": 8,
-      "source_line": 390,
+      "source_line": 393,
       "wrapper_target": null
     },
     {
@@ -30338,7 +30338,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner.discard_admission",
       "source_column": 8,
-      "source_line": 352,
+      "source_line": 355,
       "wrapper_target": "chrys.foundation.util.once_close.finish_close"
     },
     {
@@ -30358,7 +30358,7 @@
       "primitive": "sync_primitive",
       "qualname": "WorkflowSessionOwner.edit",
       "source_column": 19,
-      "source_line": 295,
+      "source_line": 298,
       "wrapper_target": null
     },
     {
@@ -30438,7 +30438,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner.save",
       "source_column": 8,
-      "source_line": 323,
+      "source_line": 326,
       "wrapper_target": "chrys.foundation.util.once_close.finish_close"
     },
     {
@@ -30458,7 +30458,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner.save_mutations",
       "source_column": 8,
-      "source_line": 313,
+      "source_line": 316,
       "wrapper_target": "chrys.foundation.util.once_close.finish_close"
     },
     {
@@ -30478,7 +30478,7 @@
       "primitive": "wrapper",
       "qualname": "WorkflowSessionOwner.set_model",
       "source_column": 8,
-      "source_line": 300,
+      "source_line": 303,
       "wrapper_target": "chrys.foundation.util.once_close.finish_close"
     },
     {
@@ -33658,7 +33658,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._ensure_auto_fulfill_block_subscription",
       "source_column": 8,
-      "source_line": 656,
+      "source_line": 665,
       "wrapper_target": null
     },
     {
@@ -33678,7 +33678,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.close",
       "source_column": 8,
-      "source_line": 660,
+      "source_line": 669,
       "wrapper_target": null
     },
     {
@@ -33698,7 +33698,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 12,
-      "source_line": 339,
+      "source_line": 340,
       "wrapper_target": null
     },
     {
@@ -33718,7 +33718,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 20,
-      "source_line": 362,
+      "source_line": 363,
       "wrapper_target": null
     },
     {
@@ -33738,7 +33738,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 16,
-      "source_line": 383,
+      "source_line": 384,
       "wrapper_target": null
     },
     {
@@ -33758,7 +33758,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 16,
-      "source_line": 412,
+      "source_line": 413,
       "wrapper_target": null
     },
     {
@@ -33778,7 +33778,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 12,
-      "source_line": 426,
+      "source_line": 427,
       "wrapper_target": null
     },
     {
@@ -33798,7 +33798,7 @@
       "primitive": "async_context",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 23,
-      "source_line": 465,
+      "source_line": 472,
       "wrapper_target": null
     },
     {
@@ -33818,7 +33818,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 24,
-      "source_line": 477,
+      "source_line": 484,
       "wrapper_target": "chrys.service.agent_middleware.control.approval.ApprovalMiddleware._ensure_auto_fulfill_block_subscription"
     },
     {
@@ -33838,7 +33838,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 20,
-      "source_line": 481,
+      "source_line": 488,
       "wrapper_target": null
     },
     {
@@ -33858,7 +33858,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 24,
-      "source_line": 534,
+      "source_line": 542,
       "wrapper_target": null
     },
     {
@@ -33878,7 +33878,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 31,
-      "source_line": 543,
+      "source_line": 551,
       "wrapper_target": "chrys.service.agent_middleware.control.approval_hooks.await_approval_with_hooks"
     },
     {
@@ -33898,7 +33898,7 @@
       "primitive": "future",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 28,
-      "source_line": 565,
+      "source_line": 573,
       "wrapper_target": null
     },
     {
@@ -33911,14 +33911,14 @@
           "when": "all_paths"
         }
       ],
-      "expression": "await approval_trace.resolved(approved=approved, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='user_reason' if reason else '', arguments_modified=bool(modified_args))",
+      "expression": "await approval_trace.resolved(approved=approved, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='user_reason' if reason else '', arguments_modified=bool(modified_args), judge_audit=judge_audit)",
       "identity": "chrys.service.agent_middleware.control.approval:ApprovalMiddleware.process:12",
       "module": "chrys.service.agent_middleware.control.approval",
       "ordinal": 12,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 16,
-      "source_line": 577,
+      "source_line": 585,
       "wrapper_target": null
     },
     {
@@ -33938,7 +33938,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 31,
-      "source_line": 598,
+      "source_line": 607,
       "wrapper_target": "chrys.service.agent_middleware.events.hook_dispatch.apply_before_tool_hooks"
     },
     {
@@ -33958,7 +33958,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 20,
-      "source_line": 619,
+      "source_line": 628,
       "wrapper_target": null
     },
     {
@@ -33978,7 +33978,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 12,
-      "source_line": 639,
+      "source_line": 648,
       "wrapper_target": null
     },
     {
@@ -37538,7 +37538,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalDecisionArbiter.close",
       "source_column": 8,
-      "source_line": 100,
+      "source_line": 119,
       "wrapper_target": null
     },
     {
@@ -37558,7 +37558,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalDecisionArbiter.ensure_subscription",
       "source_column": 8,
-      "source_line": 44,
+      "source_line": 45,
       "wrapper_target": null
     },
     {
@@ -37578,7 +37578,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalDecisionArbiter.judge",
       "source_column": 22,
-      "source_line": 61,
+      "source_line": 67,
       "wrapper_target": null
     },
     {
@@ -37598,7 +37598,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalDecisionArbiter.judge",
       "source_column": 8,
-      "source_line": 76,
+      "source_line": 95,
       "wrapper_target": null
     },
     {
@@ -37651,6 +37651,166 @@
           "when": "all_paths"
         }
       ],
+      "expression": "await self.client.post('decisions', cast_to=httpx.Response, body={'model': self.model_id, 'state': {'messages': [{'role': m.role, 'content': m.text} for m in messages]}, 'questions': {p.id: {'type': 'choice', 'instructions': asdict(p), 'criteria': {'true': 'The condition holds.', 'false': 'The condition does not hold.', 'unknown': 'The available input is insufficient to determine whether the condition holds.'}} for p in self.asset.principles}})",
+      "identity": "chrys.service.approval.jev:JevPredicateClient.get_response:1",
+      "module": "chrys.service.approval.jev",
+      "ordinal": 1,
+      "primitive": "awaitable",
+      "qualname": "JevPredicateClient.get_response",
+      "source_column": 19,
+      "source_line": 40,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "async with self._client_lock",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._close_clients:1",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 1,
+      "primitive": "sync_primitive",
+      "qualname": "ApprovalJudge._close_clients",
+      "source_column": 19,
+      "source_line": 576,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await client.aclose()",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._close_clients:2",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 2,
+      "primitive": "awaitable",
+      "qualname": "ApprovalJudge._close_clients",
+      "source_column": 16,
+      "source_line": 580,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await self._reasoning_judge.aclose()",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._close_clients:3",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 3,
+      "primitive": "awaitable",
+      "qualname": "ApprovalJudge._close_clients",
+      "source_column": 16,
+      "source_line": 583,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await self._get_client()",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._evaluate_direct:1",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 1,
+      "primitive": "wrapper",
+      "qualname": "ApprovalJudge._evaluate_direct",
+      "source_column": 17,
+      "source_line": 772,
+      "wrapper_target": "chrys.service.approval.judge.ApprovalJudge._get_client"
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await self._get_final_response(client, messages, stream=self._profile.stream, options=self._chat_options, timeout=self._profile.http_read_timeout, audit=audit)",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._evaluate_direct:2",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 2,
+      "primitive": "wrapper",
+      "qualname": "ApprovalJudge._evaluate_direct",
+      "source_column": 23,
+      "source_line": 783,
+      "wrapper_target": "chrys.service.approval.judge.ApprovalJudge._get_final_response"
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await self._get_client()",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._evaluate_predicates:1",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 1,
+      "primitive": "wrapper",
+      "qualname": "ApprovalJudge._evaluate_predicates",
+      "source_column": 17,
+      "source_line": 713,
+      "wrapper_target": "chrys.service.approval.judge.ApprovalJudge._get_client"
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await self._get_final_response(client, messages, stream=self._profile.stream and (not isinstance(client, JevPredicateClient)), options=self._chat_options, timeout=self._profile.http_read_timeout, audit=audit)",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._evaluate_predicates:2",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 2,
+      "primitive": "wrapper",
+      "qualname": "ApprovalJudge._evaluate_predicates",
+      "source_column": 23,
+      "source_line": 724,
+      "wrapper_target": "chrys.service.approval.judge.ApprovalJudge._get_final_response"
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
       "expression": "async with self._client_lock",
       "identity": "chrys.service.approval.judge:ApprovalJudge._get_client:1",
       "module": "chrys.service.approval.judge",
@@ -37658,7 +37818,7 @@
       "primitive": "sync_primitive",
       "qualname": "ApprovalJudge._get_client",
       "source_column": 19,
-      "source_line": 455,
+      "source_line": 541,
       "wrapper_target": null
     },
     {
@@ -37678,7 +37838,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalJudge._get_client",
       "source_column": 31,
-      "source_line": 462,
+      "source_line": 548,
       "wrapper_target": "chrys.service.llm.clients.create_client"
     },
     {
@@ -37691,34 +37851,54 @@
           "when": "all_paths"
         }
       ],
-      "expression": "async with self._client_lock",
+      "expression": "await get_final_response(client, messages, stream=stream, options=options, timeout=timeout)",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._get_final_response:1",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 1,
+      "primitive": "wrapper",
+      "qualname": "ApprovalJudge._get_final_response",
+      "source_column": 19,
+      "source_line": 836,
+      "wrapper_target": "chrys.service.llm.responses.get_final_response"
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await get_final_response(client, messages, stream=stream, options=options, timeout=timeout)",
+      "identity": "chrys.service.approval.judge:ApprovalJudge._get_final_response:2",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 2,
+      "primitive": "wrapper",
+      "qualname": "ApprovalJudge._get_final_response",
+      "source_column": 23,
+      "source_line": 857,
+      "wrapper_target": "chrys.service.llm.responses.get_final_response"
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await self._close()",
       "identity": "chrys.service.approval.judge:ApprovalJudge.aclose:1",
       "module": "chrys.service.approval.judge",
       "ordinal": 1,
-      "primitive": "sync_primitive",
-      "qualname": "ApprovalJudge.aclose",
-      "source_column": 19,
-      "source_line": 474,
-      "wrapper_target": null
-    },
-    {
-      "cases": [
-        {
-          "classification": "B",
-          "container_rule": "unresolved_outer_container",
-          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
-          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
-          "when": "all_paths"
-        }
-      ],
-      "expression": "await client.aclose()",
-      "identity": "chrys.service.approval.judge:ApprovalJudge.aclose:2",
-      "module": "chrys.service.approval.judge",
-      "ordinal": 2,
       "primitive": "awaitable",
       "qualname": "ApprovalJudge.aclose",
-      "source_column": 12,
-      "source_line": 477,
+      "source_column": 8,
+      "source_line": 573,
       "wrapper_target": null
     },
     {
@@ -37731,15 +37911,15 @@
           "when": "all_paths"
         }
       ],
-      "expression": "await self._get_client()",
+      "expression": "await self._evaluate_direct(user_message=user_message, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, request_id=request_id, log_dir=log_dir, user_messages=user_messages)",
       "identity": "chrys.service.approval.judge:ApprovalJudge.evaluate:1",
       "module": "chrys.service.approval.judge",
       "ordinal": 1,
       "primitive": "wrapper",
       "qualname": "ApprovalJudge.evaluate",
-      "source_column": 17,
-      "source_line": 499,
-      "wrapper_target": "chrys.service.approval.judge.ApprovalJudge._get_client"
+      "source_column": 19,
+      "source_line": 601,
+      "wrapper_target": "chrys.service.approval.judge.ApprovalJudge._evaluate_direct"
     },
     {
       "cases": [
@@ -37751,15 +37931,35 @@
           "when": "all_paths"
         }
       ],
-      "expression": "await get_final_response(client, messages, stream=self._profile.stream, options=self._chat_options, timeout=self._profile.http_read_timeout)",
+      "expression": "await asyncio.wait_for(self._evaluate_predicates(asset=asset, user_message=user_message, user_messages=user_messages, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, audit=audit), timeout=remaining)",
       "identity": "chrys.service.approval.judge:ApprovalJudge.evaluate:2",
       "module": "chrys.service.approval.judge",
       "ordinal": 2,
-      "primitive": "wrapper",
+      "primitive": "timeout",
       "qualname": "ApprovalJudge.evaluate",
-      "source_column": 23,
-      "source_line": 510,
-      "wrapper_target": "chrys.service.llm.responses.get_final_response"
+      "source_column": 24,
+      "source_line": 644,
+      "wrapper_target": null
+    },
+    {
+      "cases": [
+        {
+          "classification": "B",
+          "container_rule": "unresolved_outer_container",
+          "degradation_rule": "Mark the containing residual Unresolved; never report it as exact.",
+          "reason": "No enclosing trajectory interval is machine-proven for every call path; fail closed until reviewed.",
+          "when": "all_paths"
+        }
+      ],
+      "expression": "await asyncio.wait_for(self._reasoning_judge._evaluate_direct(user_message=user_message, user_messages=user_messages, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, request_id=request_id, log_dir=log_dir, audit=audit), timeout=remaining)",
+      "identity": "chrys.service.approval.judge:ApprovalJudge.evaluate:3",
+      "module": "chrys.service.approval.judge",
+      "ordinal": 3,
+      "primitive": "timeout",
+      "qualname": "ApprovalJudge.evaluate",
+      "source_column": 22,
+      "source_line": 669,
+      "wrapper_target": null
     },
     {
       "cases": [
@@ -48738,7 +48938,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalTrace.resolved",
       "source_column": 12,
-      "source_line": 175,
+      "source_line": 194,
       "wrapper_target": null
     },
     {

@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
 
     from chrys.foundation.events.bus import EventBus
     from chrys.kernel.middleware import FunctionInvocationContext
-    from chrys.service.approval.judge import ApprovalJudge
+    from chrys.service.approval.judge import ApprovalJudge, JudgeVerdict
     from chrys.service.approval.policy import ApprovalPolicy
     from chrys.service.approval.turn_context import TurnContextHolder
     from chrys.service.hooks.manager import HookManager
@@ -456,6 +457,12 @@ class ApprovalMiddleware(FunctionMiddleware):
         # arrival order.
         self._decisions.append(decision)
 
+        judge_audit: Mapping[str, Any] | None = None
+
+        def _record_judge_audit(verdict: JudgeVerdict) -> None:
+            nonlocal judge_audit
+            judge_audit = verdict.audit
+
         judge_task: asyncio.Task[None] | None = None
         approval_trace = None
         try:
@@ -522,6 +529,7 @@ class ApprovalMiddleware(FunctionMiddleware):
                                         session_id=self._session_id,
                                     ),
                                     log_dir=self._approval_log_dir,
+                                    on_verdict=_record_judge_audit,
                                 )
                             )
 
@@ -579,6 +587,7 @@ class ApprovalMiddleware(FunctionMiddleware):
                     decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE,
                     reason_code="user_reason" if reason else "",
                     arguments_modified=bool(modified_args),
+                    judge_audit=judge_audit,
                 )
         except BaseException:
             # Interrupted (or failed) while the dialog was still open: the

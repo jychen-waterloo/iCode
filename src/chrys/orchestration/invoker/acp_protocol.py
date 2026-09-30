@@ -396,6 +396,19 @@ class AcpUpdateTranslator:
             }
         )
 
+    def record_permission_review(self, request_id: str, audit: Mapping[str, Any]) -> None:
+        """Append Formal Judge route evidence for a remote permission request."""
+        self._append_audit_item(
+            {
+                "seq": None,
+                "update": {
+                    "sessionUpdate": "permission_review",
+                    "request_id": request_id,
+                    "formal_audit": _bounded_value(dict(audit)),
+                },
+            }
+        )
+
     def _append_audit_item(self, item: dict[str, Any]) -> None:
         item["attempt"] = self.attempt
         size = len(json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str).encode())
@@ -787,6 +800,10 @@ class AcpPermissionBroker:
             outcome=outcome,
         )
 
+    def _record_judge_audit(self, request_id: str, audit: Mapping[str, Any] | None) -> None:
+        if audit is not None and self._translator is not None:
+            self._translator.record_permission_review(request_id=request_id, audit=audit)
+
     async def _decide_permission(
         self,
         tool_call: ToolCallUpdate,
@@ -885,6 +902,7 @@ class AcpPermissionBroker:
                                 session_id=self._session_id,
                             ),
                             log_dir=None,
+                            on_verdict=lambda verdict: self._record_judge_audit(request_id, verdict.audit),
                         ),
                     )
             except BaseException:

@@ -50,6 +50,7 @@ class ModelProfile:
     chat_options: str = ""  # JSON object of provider request options
     stream: bool = False  # Stream response
     vision: bool = False  # Supports image input
+    formal_enabled: bool = False  # Opt-in predicate approval for this Judge profile
 
 
 def is_model_profile_selectable(profile: ModelProfile) -> bool:

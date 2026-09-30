@@ -20,6 +20,16 @@
 >
 > **手动模式不代表每次工具调用都会弹窗**。手动模式只表示需要审批的调用由用户决定；不需要审批或符合自动放行条件的调用会直接执行，详见[了解自动放行与安全保护](#了解自动放行与安全保护)。
 
+## 可选的 Formal 判定
+
+在选中的 approval-judge 模型配置中设置 `formal_enabled: true`，启用两阶段审批。第一阶段使用该 profile（普通 LLM 或 Jev），在一次请求中批量判断七个谓词，并传入完整定义、例子和例外。每个 ID 必须返回 JSON `true`、`false` 或 `"unknown"`；unknown 表示现有输入不足。缺失、重复、多余 ID 或非法响应会重试，不会补成 unknown。
+
+任一谓词为 `true`，保留现有人工审批对话框，不调用第二阶段。没有 true 时（全 false、false/unknown 混合、全 unknown），使用 iCode 原有审批 prompt 和主 agent 已配置的普通模型进行第二阶段判断。请将主模型配置为所需的 reasoning LLM，并设置其原有 reasoning/chat options；Jev 不能充当第二阶段聊天模型。Workflow 节点使用自身实际模型，没有节点模型时使用运行模型。只有第二阶段明确返回 `approved: true` 才自动批准。
+
+各谓词独立：即使用户明确要求 `git push`，`external_action` 仍为 true，`scope_escalation` 可以为 false，整体仍转人工。两阶段及重试共用 approval-judge profile 的总超时预算。资产错误、模型错误和重试耗尽转人工；取消仍按取消处理。原有审计记录包含阶段、谓词结果、模型 profile 和调用次数。
+
+`formal_enabled: false` 保留原有 Direct 行为。只读快速放行和审批入口优先级不变；这些规则仅适用于进入 Formal 的调用。
+
 ## 在 TUI 中切换审批模式
 
 在 TUI 中可以使用以下任一方式切换当前使用的审批模式：
