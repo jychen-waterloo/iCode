@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import PurePath
 
 from chrys.kernel.exceptions import ModelVisibleToolError
@@ -21,6 +22,10 @@ def argument_snapshot(value: object) -> object:
 
 def _freeze(value: object) -> tuple:
     kind = type(value)
+    if isinstance(value, Enum):
+        # Pydantic's Python-mode dump retains Enum instances. Their class and
+        # frozen value must remain distinct from strings/integers and other enums.
+        return kind, value.name, _freeze(value.value)
     if kind in (str, bool, int, bytes, type(None)):
         return kind, value
     if type(value) is float:

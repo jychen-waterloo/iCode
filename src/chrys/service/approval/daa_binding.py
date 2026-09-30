@@ -20,6 +20,7 @@ from chrys.service.tools.builtins.shell import ShellTools
 if TYPE_CHECKING:
     from chrys.foundation.models.session_env import SessionEnvironment
     from chrys.kernel.middleware import FunctionInvocationContext
+    from chrys.service.tools.file_approval import FileWriteTarget
 
 
 class DAABinding:
@@ -34,7 +35,7 @@ class DAABinding:
         self.profile_fingerprint = profile_fingerprint
         self.service = DAAService(DAAStore(runtime.platform.config_dir / "daa-minimal-v1.sqlite3"))
 
-    def file_targets(self, context: FunctionInvocationContext) -> tuple[str, ...] | None:
+    def file_targets(self, context: FunctionInvocationContext) -> tuple[FileWriteTarget, ...] | None:
         """Resolve only authoritative builtin writes, also for one-time confirmation."""
         tool = context.function
         owner = tool._instance
@@ -45,7 +46,7 @@ class DAABinding:
             or not isinstance(context.arguments, dict)
         ):
             return None
-        return owner.affected_paths(context.arguments)
+        return owner.approval_targets(context.arguments)
 
     def candidate(
         self,
@@ -79,7 +80,7 @@ class DAABinding:
                 FilesystemTools.edit_file.func,
             ):
                 return None
-            return self.service.file_candidate(self.file_targets(context), reuse)
+            return self.service.file_candidate(owner.affected_paths(context.arguments), reuse)
         if kind == KIND_SHELL:
             if not isinstance(owner, ShellTools) or func is not ShellTools.execute.func:
                 return None

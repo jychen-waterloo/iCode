@@ -25,7 +25,7 @@ from chrys.foundation.platform.files import surrogate_safe_text
 from chrys.foundation.platform.paths import resolve_existing_path, resolve_workspace_path
 from chrys.foundation.text.images import ImageProcessingError, load_image_file
 from chrys.kernel import Content
-from chrys.service.tools.file_approval import approved_write_path, file_write_target
+from chrys.service.tools.file_approval import FileWriteTarget, approved_write_path, file_write_target
 from chrys.service.tools.kinds import KIND_FILESYSTEM_READ, KIND_FILESYSTEM_WRITE, tool
 from chrys.service.tools.result_metadata import tool_error
 from chrys.service.tools.session_artifacts import (
@@ -920,15 +920,22 @@ class FilesystemTools:
         """Return filesystem tools for this runtime context."""
         return [self.read_file, self.view_image, self.write_file, self.edit_file]
 
-    def affected_paths(self, arguments: dict[str, object]) -> tuple[str, ...] | None:
-        """Complete physical write/edit targets; ambiguous destinations cannot reuse approval."""
+    def approval_targets(self, arguments: dict[str, object]) -> tuple[FileWriteTarget, ...]:
+        """One-time targets, including final symlinks; unresolved paths authorize nothing."""
         path = arguments.get("path")
         if not isinstance(path, str) or not path or "\0" in path:
-            return None
+            return ()
         try:
             return (file_write_target(path, base_cwd=self._runtime.cwd),)
         except OSError, ValueError:
+            return ()
+
+    def affected_paths(self, arguments: dict[str, object]) -> tuple[str, ...] | None:
+        """Reusable physical destinations exclude mixed read/replace symlink operations."""
+        targets = self.approval_targets(arguments)
+        if not targets or any(target.link_target is not None for target in targets):
             return None
+        return tuple(target.path for target in targets)
 
     @tool(kind=KIND_FILESYSTEM_READ)
     def read_file(

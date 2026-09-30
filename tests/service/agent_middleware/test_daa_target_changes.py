@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from enum import Enum, IntEnum, StrEnum
 from pathlib import Path
 from unittest.mock import AsyncMock, create_autospec
 
@@ -27,6 +28,7 @@ from chrys.service.hooks.events import HookEvent
 from chrys.service.hooks.manager import HookManager
 from chrys.service.hooks.schema import HookDecision
 from chrys.service.profiles.agents.schema import ApprovalConfig
+from chrys.service.tools.builtins import filesystem
 from chrys.service.tools.builtins.filesystem import FilesystemTools
 from tests.kernel._fakes import _call_response, _result_contents, _stack, _text_response, _user
 from tests.support.symlinks import symlink_or_skip
@@ -325,6 +327,200 @@ async def test_uninspectable_host_object_fails_closed_without_reapproval_loop(se
     try:
         with pytest.raises(ModelVisibleToolError, match="cannot be safely compared"):
             await middleware.process(context, called)
+        called.assert_not_awaited()
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, respond)
+
+
+@pytest.mark.parametrize("operation", ["write_file", "edit_file"])
+@pytest.mark.parametrize("phase", ["approval", "execution"])
+@pytest.mark.parametrize("changed_link", ["parent", "leaf"])
+async def test_final_symlink_destination_remains_tracked_for_one_time_approval(
+    setup, destinations, operation, phase, changed_link
+):
+    tools, binding, bus, policy = setup
+    first, second, link = destinations
+    for directory in (first, second):
+        (directory / "referent.txt").write_text("original", encoding="utf-8")
+        (directory / "result.txt").unlink()
+        symlink_or_skip(directory / "result.txt", directory / "referent.txt")
+    context = file_context(tools, operation)
+    assert binding.candidate(context) is None
+    requests = []
+
+    def change_target():
+        if changed_link == "parent":
+            retarget(link, second)
+        else:
+            (first / "result.txt").unlink()
+            symlink_or_skip(first / "result.txt", second / "referent.txt")
+
+    async def respond(event):
+        requests.append(event)
+        if len(requests) == 1 and phase == "approval":
+            await asyncio.to_thread(change_target)
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=len(requests) == 1))
+
+    async def execute():
+        if phase == "execution":
+            await asyncio.to_thread(change_target)
+        context.result = await context.function.invoke(context=context, skip_parsing=True)
+
+    middleware = ApprovalMiddleware(policy, bus, daa=binding)
+    await bus.subscribe(ApprovalRequest, respond)
+    try:
+        await middleware.process(context, execute)
+        assert (first / "result.txt").is_symlink()
+        assert (second / "result.txt").is_symlink()
+        assert (first / "referent.txt").read_text(encoding="utf-8") == "original"
+        assert (second / "referent.txt").read_text(encoding="utf-8") == "original"
+        assert len(requests) == (2 if phase == "approval" else 1)
+        assert all(not request.daa_exact for request in requests)
+        assert str(context.result).startswith("Error:")
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, respond)
+
+
+class _StringChoice(StrEnum):
+    SAFE = "safe"
+    CHANGED = "changed"
+
+
+class _IntegerChoice(IntEnum):
+    SAFE = 1
+    CHANGED = 2
+
+
+class _PlainChoice(Enum):
+    SAFE = "safe"
+    CHANGED = "changed"
+
+
+@pytest.mark.parametrize("enum_type", [_StringChoice, _IntegerChoice, _PlainChoice])
+@pytest.mark.parametrize("changed", [False, True])
+async def test_enum_arguments_reach_approval_and_changes_require_reapproval(setup, enum_type, changed):
+    _, binding, bus, policy = setup
+    contexts, requests, executed = [], [], []
+
+    class CaptureContext(FunctionMiddleware):
+        async def process(self, context, call_next):
+            contexts.append(context)
+            await call_next()
+
+    async def consume(value) -> str:
+        executed.append(value)
+        return "enum tool completed"
+
+    tool = FunctionTool(name="enum_tool", func=consume, input_model=create_model("EnumTool", value=(enum_type, ...)))
+
+    async def respond(event):
+        requests.append(event)
+        if changed and len(requests) == 1:
+            contexts[0].arguments["value"] = enum_type.CHANGED
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=len(requests) == 1))
+
+    middleware = ApprovalMiddleware(policy, bus, daa=binding)
+    await bus.subscribe(ApprovalRequest, respond)
+    try:
+        layer, _ = _stack(
+            [_call_response(("call-enum", "enum_tool", {"value": enum_type.SAFE.value})), _text_response()],
+            middleware=[CaptureContext(), middleware],
+        )
+        response = await layer.get_response([_user()], options={"tools": [tool]})
+        assert [request.args["value"] for request in requests] == (
+            [enum_type.SAFE, enum_type.CHANGED] if changed else [enum_type.SAFE]
+        )
+        assert all(isinstance(request.args["value"], enum_type) and not request.daa_exact for request in requests)
+        if changed:
+            assert not executed
+            assert "rejected by user" in _result_contents(response)[0].result
+        else:
+            assert executed == [enum_type.SAFE]
+            assert _result_contents(response)[0].result == "enum tool completed"
+        assert not binding.service.rules()
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, respond)
+
+
+@pytest.mark.parametrize("link_kind", ["dangling", "looping"])
+async def test_unchanged_final_symlink_can_still_be_replaced_once(setup, tmp_path, link_kind):
+    tools, binding, bus, policy = setup
+    link = tmp_path / "result.txt"
+    symlink_or_skip(link, link if link_kind == "looping" else tmp_path / "missing.txt")
+    context = file_context(tools, "write_file")
+    context.arguments["path"] = str(link)
+    requests = []
+
+    async def respond(event):
+        requests.append(event)
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=True, daa_choice="EXACT_SESSION"))
+
+    async def execute():
+        context.result = await context.function.invoke(context=context, skip_parsing=True)
+
+    middleware = ApprovalMiddleware(policy, bus, daa=binding)
+    await bus.subscribe(ApprovalRequest, respond)
+    try:
+        await middleware.process(context, execute)
+        assert len(requests) == 1 and not requests[0].daa_exact
+        assert not binding.service.rules()
+        assert not link.is_symlink()
+        assert link.read_text(encoding="utf-8") == "changed"
+        assert not (tmp_path / "missing.txt").exists()
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, respond)
+
+
+async def test_unresolved_one_time_target_does_not_disable_worker_guard(setup, destinations, monkeypatch):
+    tools, binding, bus, policy = setup
+    first, _, _ = destinations
+    context = file_context(tools, "write_file")
+
+    def unavailable(path, *, base_cwd=None):
+        raise OSError("Cannot resolve the target during approval")
+
+    # Only the approval adapter fails; the real worker can resolve the path.
+    monkeypatch.setattr(filesystem, "file_write_target", unavailable)
+
+    async def respond(event):
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=True))
+
+    async def execute():
+        context.result = await context.function.invoke(context=context, skip_parsing=True)
+
+    middleware = ApprovalMiddleware(policy, bus, daa=binding)
+    await bus.subscribe(ApprovalRequest, respond)
+    try:
+        await middleware.process(context, execute)
+        assert (first / "result.txt").read_text(encoding="utf-8") == "original"
+        assert str(context.result).startswith("Error:")
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, respond)
+
+
+@pytest.mark.parametrize("replacement", ["safe", _PlainChoice.SAFE])
+async def test_enum_snapshot_does_not_alias_a_string_or_another_enum(setup, replacement):
+    _, binding, bus, policy = setup
+    context = FunctionInvocationContext(FunctionTool(name="typed"), {"value": _StringChoice.SAFE})
+    requests = []
+
+    async def respond(event):
+        requests.append(event)
+        if len(requests) == 1:
+            context.arguments["value"] = replacement
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=len(requests) == 1))
+
+    called = AsyncMock(spec=lambda: None)
+    middleware = ApprovalMiddleware(policy, bus, daa=binding)
+    await bus.subscribe(ApprovalRequest, respond)
+    try:
+        await middleware.process(context, called)
+        assert len(requests) == 2
         called.assert_not_awaited()
     finally:
         await middleware.close()

@@ -8,24 +8,39 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 
 from chrys.foundation.platform.paths import resolve_workspace_path
 
-_approved_targets: ContextVar[tuple[str, ...] | None] = ContextVar("approved_file_targets", default=None)
+
+@dataclass(frozen=True)
+class FileWriteTarget:
+    """The replaced entry and, for a symlink, the source read by write/edit previews."""
+
+    path: str
+    link_target: str | None = None
+    referent: str | None = None
 
 
-def file_write_target(path: str, *, base_cwd: str | None = None) -> str:
-    """Resolve directory links, allowing new files but rejecting unresolvable paths."""
+_approved_targets: ContextVar[tuple[FileWriteTarget, ...] | None] = ContextVar("approved_file_targets", default=None)
+
+
+def file_write_target(path: str, *, base_cwd: str | None = None) -> FileWriteTarget:
+    """Track one-time approval independently of whether a destination is reusable."""
     lexical = resolve_workspace_path(path, base_cwd=base_cwd)
-    # Atomic replacement replaces a final symlink itself, while edit previews
-    # read its referent. Keep this mixed operation on ordinary approval.
-    if os.path.islink(lexical):
-        raise ValueError("A final symbolic link is not a reusable file destination.")
-    return os.path.realpath(lexical, strict=os.path.ALLOW_MISSING)
+    # Resolve only the parent: atomic replacement replaces the final entry,
+    # not its referent. Pin this entry even when it is a final-file symlink.
+    parent, name = os.path.split(lexical)
+    entry = os.path.join(os.path.realpath(parent, strict=os.path.ALLOW_MISSING), name)
+    if os.path.islink(entry):
+        # Non-strict resolution preserves the existing ability to replace a
+        # dangling or looping final link; such links still cannot mint grants.
+        return FileWriteTarget(entry, os.readlink(entry), os.path.realpath(entry))
+    return FileWriteTarget(entry)
 
 
 @contextmanager
-def approved_file_targets(targets: tuple[str, ...] | None) -> Iterator[None]:
+def approved_file_targets(targets: tuple[FileWriteTarget, ...] | None) -> Iterator[None]:
     token = _approved_targets.set(targets)
     try:
         yield
@@ -41,4 +56,4 @@ def approved_write_path(path: str, *, base_cwd: str | None = None) -> str:
     target = file_write_target(path, base_cwd=base_cwd)
     if target not in targets:
         raise ValueError("File destination changed after approval; request approval again.")
-    return target
+    return target.path
