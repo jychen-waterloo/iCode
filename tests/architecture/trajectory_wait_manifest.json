@@ -33678,7 +33678,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._ensure_auto_fulfill_block_subscription",
       "source_column": 8,
-      "source_line": 819,
+      "source_line": 835,
       "wrapper_target": null
     },
     {
@@ -33698,7 +33698,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 12,
-      "source_line": 386,
+      "source_line": 388,
       "wrapper_target": null
     },
     {
@@ -33718,7 +33718,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 20,
-      "source_line": 409,
+      "source_line": 411,
       "wrapper_target": null
     },
     {
@@ -33738,7 +33738,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 430,
+      "source_line": 432,
       "wrapper_target": null
     },
     {
@@ -33758,7 +33758,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 464,
+      "source_line": 466,
       "wrapper_target": null
     },
     {
@@ -33778,7 +33778,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 12,
-      "source_line": 478,
+      "source_line": 480,
       "wrapper_target": null
     },
     {
@@ -33798,7 +33798,7 @@
       "primitive": "thread_pool",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 26,
-      "source_line": 541,
+      "source_line": 549,
       "wrapper_target": null
     },
     {
@@ -33817,8 +33817,8 @@
       "ordinal": 7,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
-      "source_column": 16,
-      "source_line": 558,
+      "source_column": 20,
+      "source_line": 567,
       "wrapper_target": null
     },
     {
@@ -33838,7 +33838,7 @@
       "primitive": "async_context",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 23,
-      "source_line": 586,
+      "source_line": 595,
       "wrapper_target": null
     },
     {
@@ -33858,7 +33858,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 24,
-      "source_line": 605,
+      "source_line": 614,
       "wrapper_target": "chrys.service.agent_middleware.control.approval.ApprovalMiddleware._ensure_auto_fulfill_block_subscription"
     },
     {
@@ -33878,7 +33878,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 20,
-      "source_line": 609,
+      "source_line": 618,
       "wrapper_target": null
     },
     {
@@ -33898,7 +33898,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 24,
-      "source_line": 665,
+      "source_line": 674,
       "wrapper_target": null
     },
     {
@@ -33918,7 +33918,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 31,
-      "source_line": 674,
+      "source_line": 683,
       "wrapper_target": "chrys.service.agent_middleware.control.approval_hooks.await_approval_with_hooks"
     },
     {
@@ -33938,7 +33938,7 @@
       "primitive": "future",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 28,
-      "source_line": 696,
+      "source_line": 705,
       "wrapper_target": null
     },
     {
@@ -33958,7 +33958,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 710,
+      "source_line": 719,
       "wrapper_target": null
     },
     {
@@ -33978,7 +33978,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 31,
-      "source_line": 739,
+      "source_line": 749,
       "wrapper_target": "chrys.service.agent_middleware.events.hook_dispatch.apply_before_tool_hooks"
     },
     {
@@ -33998,7 +33998,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 20,
-      "source_line": 761,
+      "source_line": 772,
       "wrapper_target": null
     },
     {
@@ -34018,7 +34018,7 @@
       "primitive": "thread_pool",
       "qualname": "ApprovalMiddleware._process",
       "source_column": 16,
-      "source_line": 797,
+      "source_line": 812,
       "wrapper_target": null
     },
     {
@@ -34037,8 +34037,8 @@
       "ordinal": 18,
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware._process",
-      "source_column": 12,
-      "source_line": 801,
+      "source_column": 16,
+      "source_line": 817,
       "wrapper_target": null
     },
     {
@@ -34058,7 +34058,7 @@
       "primitive": "awaitable",
       "qualname": "ApprovalMiddleware.close",
       "source_column": 8,
-      "source_line": 823,
+      "source_line": 839,
       "wrapper_target": null
     },
     {
@@ -34078,7 +34078,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 23,
-      "source_line": 327,
+      "source_line": 329,
       "wrapper_target": "chrys.service.agent_middleware.control.approval.ApprovalMiddleware._process"
     },
     {
@@ -34098,7 +34098,7 @@
       "primitive": "wrapper",
       "qualname": "ApprovalMiddleware.process",
       "source_column": 15,
-      "source_line": 335,
+      "source_line": 337,
       "wrapper_target": "chrys.service.agent_middleware.events.hook_dispatch.apply_before_tool_hooks"
     },
     {

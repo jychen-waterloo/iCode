@@ -34,6 +34,19 @@ class DAABinding:
         self.profile_fingerprint = profile_fingerprint
         self.service = DAAService(DAAStore(runtime.platform.config_dir / "daa-minimal-v1.sqlite3"))
 
+    def file_targets(self, context: FunctionInvocationContext) -> tuple[str, ...] | None:
+        """Resolve only authoritative builtin writes, also for one-time confirmation."""
+        tool = context.function
+        owner = tool._instance
+        if (
+            self.tools.get(tool.name) is not tool
+            or not isinstance(owner, FilesystemTools)
+            or tool.func not in (FilesystemTools.write_file.func, FilesystemTools.edit_file.func)
+            or not isinstance(context.arguments, dict)
+        ):
+            return None
+        return owner.affected_paths(context.arguments)
+
     def candidate(
         self,
         context: FunctionInvocationContext,
@@ -66,7 +79,7 @@ class DAABinding:
                 FilesystemTools.edit_file.func,
             ):
                 return None
-            return self.service.file_candidate(owner.affected_paths(context.arguments), reuse)
+            return self.service.file_candidate(self.file_targets(context), reuse)
         if kind == KIND_SHELL:
             if not isinstance(owner, ShellTools) or func is not ShellTools.execute.func:
                 return None

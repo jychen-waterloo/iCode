@@ -46,6 +46,7 @@ from chrys.service.agent_middleware.events.hook_dispatch import (
     get_tool_invocation_order,
 )
 from chrys.service.approval.arbitration import ApprovalDecisionArbiter, ApprovalJudgeInput
+from chrys.service.approval.argument_snapshot import argument_snapshot
 from chrys.service.approval.correlation import OneShotCorrelation
 from chrys.service.approval.daa import canonical
 from chrys.service.approval.daa_binding import DAABinding
@@ -56,6 +57,7 @@ from chrys.service.approval.safety_classifier import (
     shell_command_may_access_sensitive_data,
     target_may_access_sensitive_data,
 )
+from chrys.service.tools.file_approval import approved_file_targets
 from chrys.service.trajectory.approvals import ApprovalDecider, ApprovalTrace
 from chrys.service.trajectory.tools import tool_operation_id
 
@@ -498,8 +500,10 @@ class ApprovalMiddleware(FunctionMiddleware):
         if self._daa is not None:
             # DAA-only confirmation snapshot, never a future reuse key. Keep
             # ordinary approval free of serialization and tool identity checks.
+            confirmed_arguments = argument_snapshot(context.arguments)
+            file_targets = self._daa.file_targets
+            confirmed_file_targets = file_targets(context)
             parsed_args = deepcopy(parsed_args)
-            confirmed_arguments = _daa_argument_snapshot(context.arguments)
             confirmed_function = (context.function, context.function.name, context.function.func)
 
             # Copy structured values, keeping opaque host handles (including the
@@ -525,10 +529,14 @@ class ApprovalMiddleware(FunctionMiddleware):
                 )
 
             def request_changed() -> bool:
-                return _daa_argument_snapshot(context.arguments) != confirmed_arguments or request_identity_changed()
+                return (
+                    argument_snapshot(context.arguments) != confirmed_arguments
+                    or file_targets(context) != confirmed_file_targets
+                    or request_identity_changed()
+                )
 
         daa_candidate = None
-        if self._daa is not None and confirmed_arguments is not None:
+        if self._daa is not None and _daa_argument_snapshot(context.arguments) is not None:
             daa_candidate = self._daa.candidate(
                 context,
                 must_ask_human=must_ask_human,
@@ -555,7 +563,8 @@ class ApprovalMiddleware(FunctionMiddleware):
                         tool_order=tool_order,
                     )
                 )
-                await call_next()
+                with approved_file_targets(confirmed_file_targets):
+                    await call_next()
                 return False
 
         request_id = uuid4().hex[:_SHORT_ID_LEN]
@@ -730,7 +739,8 @@ class ApprovalMiddleware(FunctionMiddleware):
             if modified_args:
                 context.arguments = {**parsed_args, **modified_args}
                 if self._daa is not None:
-                    confirmed_arguments = _daa_argument_snapshot(context.arguments)
+                    confirmed_arguments = argument_snapshot(context.arguments)
+                    confirmed_file_targets = self._daa.file_targets(context)
                 # Re-dispatch ``before_tool_call`` hooks with the edited args.
                 # ``ToolEventMiddleware`` already fired hooks once with the
                 # original args before approval ran; without this second pass,
@@ -752,7 +762,8 @@ class ApprovalMiddleware(FunctionMiddleware):
                     target_operation_id=tool_operation_id(context.metadata),
                 )
                 # Hooks may have rewritten args further — capture the final form.
-                hooked_arguments = _daa_argument_snapshot(context.arguments) if self._daa is not None else None
+                hooked_arguments = argument_snapshot(context.arguments) if self._daa is not None else None
+                hooked_file_targets = self._daa.file_targets(context) if self._daa is not None else None
                 final_args = context.arguments if isinstance(context.arguments, dict) else modified_args
                 context.metadata[_APPROVAL_MODIFIED_ARGS_KEY] = final_args
                 if call_id and isinstance(final_args, dict):
@@ -780,7 +791,11 @@ class ApprovalMiddleware(FunctionMiddleware):
                     return False
                 if self._daa is not None and request_changed():
                     self._decisions.remove(decision)
-                    if request_identity_changed() or _daa_argument_snapshot(context.arguments) != hooked_arguments:
+                    if (
+                        request_identity_changed()
+                        or argument_snapshot(context.arguments) != hooked_arguments
+                        or self._daa.file_targets(context) != hooked_file_targets
+                    ):
                         # A later event handler changed the request again; that
                         # new request has not passed before_tool_call hooks.
                         return "rehook"
@@ -798,7 +813,8 @@ class ApprovalMiddleware(FunctionMiddleware):
                 if request_changed():
                     self._decisions.remove(decision)
                     return "rehook"
-            await call_next()
+            with approved_file_targets(confirmed_file_targets if self._daa is not None else None):
+                await call_next()
         else:
             # Return error result — LLM sees rejection and can respond naturally.
             # Set metadata flag so ToolEventMiddleware can detect rejection

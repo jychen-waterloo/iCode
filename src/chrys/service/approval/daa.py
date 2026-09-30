@@ -173,6 +173,9 @@ class PrefixRule(_Rule):
 
 class FilePathRule(_Rule):
     kind: Literal["FILE_PATH"] = "FILE_PATH"
+    # Required on disk: pre-fix lexical grants cannot be reinterpreted as
+    # physical grants. Old rows are ignored without rewriting stored data.
+    path_resolution: Literal["physical_v1"]
     key: FileApprovalKey
 
 
@@ -334,7 +337,8 @@ class DAAService:
             if not candidate.file_keys:
                 return False
             rules = [
-                FilePathRule.model_validate({**common, "id": uuid4().hex, "key": key}) for key in candidate.file_keys
+                FilePathRule.model_validate({**common, "id": uuid4().hex, "path_resolution": "physical_v1", "key": key})
+                for key in candidate.file_keys
             ]
         elif kind == "EXACT" and candidate.shell and scope == "SESSION":
             if candidate.command_key is None:
