@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Chrys. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Strict predicate assets, three-valued responses, and Formal routing."""
 
@@ -88,7 +88,7 @@ def load_default_asset() -> PredicateAsset:
 def parse_asset(raw: bytes | str) -> PredicateAsset:
     """Validate the complete array; no legacy schema or role classification."""
     try:
-        value = json.loads(raw, object_pairs_hook=_reject_duplicate_object)
+        value = json.loads(raw, object_pairs_hook=reject_duplicate_object)
     except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PredicateAssetError("invalid predicate asset JSON") from exc
     if not isinstance(value, list) or not 1 <= len(value) <= _MAX_PRINCIPLES:
@@ -124,7 +124,7 @@ def validate_predicate_response(text: str, asset: PredicateAsset) -> tuple[Predi
     if len(lines) >= 3 and lines[0].strip().lower() in {"```", "```json"} and lines[-1].strip() == "```":
         text = "\n".join(lines[1:-1])
     try:
-        data = json.loads(text, object_pairs_hook=_reject_duplicate_object)
+        data = json.loads(text, object_pairs_hook=reject_duplicate_object)
     except (json.JSONDecodeError, PredicateAssetError) as exc:
         raise PredicateAssetError("invalid predicate response JSON") from exc
     expected = {principle.id for principle in asset.principles}
@@ -199,7 +199,7 @@ def _valid_value(value: object) -> bool:
     return type(value) is bool or (isinstance(value, str) and value == "unknown")
 
 
-def _reject_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+def reject_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:

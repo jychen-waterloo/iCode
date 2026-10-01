@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Chrys. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Translate Formal predicate requests to Jev using the existing model-profile transport."""
 
@@ -13,7 +13,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from chrys.kernel import ChatResponse, Message, UsageDetails
-from chrys.service.approval.predicate import PredicateAsset, TruthValue, _reject_duplicate_object
+from chrys.service.approval.predicate import PredicateAsset, TruthValue, reject_duplicate_object
 from chrys.service.profiles.models.schema import ModelProfile
 
 
@@ -59,7 +59,7 @@ class JevPredicateClient:
         )
         # Decode before the SDK collapses duplicate answer IDs into a dict.
         try:
-            data = response.json(object_pairs_hook=_reject_duplicate_object)
+            data = response.json(object_pairs_hook=reject_duplicate_object)
         except ValueError:
             data = {}
         values = self._values(data)

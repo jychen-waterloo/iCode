@@ -26,7 +26,9 @@
 
 任一谓词为 `true`，保留现有人工审批对话框，不调用第二阶段。没有 true 时（全 false、false/unknown 混合、全 unknown），使用 iCode 原有审批 prompt 和主 agent 已配置的普通模型进行第二阶段判断。请将主模型配置为所需的 reasoning LLM，并设置其原有 reasoning/chat options；Jev 不能充当第二阶段聊天模型。Workflow 节点使用自身实际模型，没有节点模型时使用运行模型。只有第二阶段明确返回 `approved: true` 才自动批准。
 
-各谓词独立：即使用户明确要求 `git push`，`external_action` 仍为 true，`scope_escalation` 可以为 false，整体仍转人工。两阶段及重试共用 approval-judge profile 的总超时预算。资产错误、模型错误和重试耗尽转人工；取消仍按取消处理。原有审计记录包含阶段、谓词结果、模型 profile 和调用次数。
+各谓词独立：即使用户明确要求 `git push`，`external_action` 仍为 true，`scope_escalation` 可以为 false，整体仍转人工。两阶段及所有重试共用一个总超时预算，取自 approval-judge profile 的 `http_read_timeout`，单位为秒（省略时默认为 `300`）。请设置正数；`0` 或负数会立即转人工审批，并不表示禁用超时。资产错误、模型错误和重试耗尽转人工；取消仍按取消处理。原有审计记录包含阶段、谓词结果、模型 profile 和调用次数。
+
+必需输入缺失（包括工具类别为空）时，Formal 不调用模型，直接转人工审批，并记录 `failure_reason="invalid_input"`；不可用的超时预算记录为 `failure_reason="timeout"`。
 
 `formal_enabled: false` 保留原有 Direct 行为。只读快速放行和审批入口优先级不变；这些规则仅适用于进入 Formal 的调用。
 

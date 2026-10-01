@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Chrys. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Minimal Formal/Jev runtime contracts using the real factory and mocked HTTP."""
 
@@ -241,12 +241,79 @@ async def test_disabled_formal_keeps_direct_even_with_jev_model_name(monkeypatch
 
 
 @pytest.mark.parametrize("message,kind", [("Inspect source", ""), ("", "filesystem.read")])
-async def test_missing_context_retains_manual_review_policy(monkeypatch, message, kind):
+async def test_missing_context_retains_manual_review_policy(monkeypatch, tmp_path, message, kind):
     async with _judge(monkeypatch, []) as (judge, calls):
-        verdict = await judge.evaluate(message, "read_file", kind, {"path": "main.py"}, ["/workspace"])
+        verdict = await judge.evaluate(
+            message, "read_file", kind, {"path": "main.py"}, ["/workspace"], request_id="invalid", log_dir=tmp_path
+        )
         assert verdict.approved is False
         assert verdict.reason == "Approval judge input is invalid"
         assert calls == []
+        assert verdict.audit is not None
+        assert verdict.audit["failure_reason"] == "invalid_input"
+        assert verdict.audit["stages"] == verdict.audit["calls"] == []
+        assert verdict.audit["application_attempts"] == 0
+        saved = json.loads((tmp_path / "invalid.formal.jsonl").read_text())
+        assert saved["failure_reason"] == "invalid_input"
+        assert saved["request_id"] == "invalid"
+
+
+@pytest.mark.parametrize("timeout", [0, -1, None])
+async def test_unusable_time_budget_records_audit_without_model_calls(monkeypatch, tmp_path, timeout):
+    async with _judge(monkeypatch, []) as (judge, calls):
+        judge.profile.http_read_timeout = timeout
+        verdict = await judge.evaluate(
+            "Inspect source", "read_file", "filesystem.read", {}, [], request_id="budget", log_dir=tmp_path
+        )
+        assert verdict.approved is False
+        assert verdict.reason == "Approval judge time budget exhausted"
+        assert calls == []
+        assert verdict.audit is not None
+        assert verdict.audit["failure_reason"] == "timeout"
+        assert verdict.audit["stages"] == verdict.audit["calls"] == []
+        saved = json.loads((tmp_path / "budget.formal.jsonl").read_text())
+        assert saved["failure_reason"] == "timeout"
+
+
+@pytest.mark.parametrize("formal", [False, True], ids=["direct", "formal"])
+@pytest.mark.parametrize("transport", ["missing", "wrong-type"])
+async def test_unavailable_sdk_transport_does_not_block_judging(monkeypatch, formal, transport):
+    from chrys.kernel import ChatResponse, Message
+
+    class ClientWithoutTransport:
+        def __init__(self):
+            self.client = object() if transport == "missing" else type("SDK", (), {"_client": object()})()
+            self.closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    client = ClientWithoutTransport()
+    monkeypatch.setattr(clients, "create_client", create_autospec(clients.create_client, return_value=client))
+    responses = [ChatResponse(messages=[Message("assistant", ['{"approved":true,"reason":"ok"}'])])]
+    if formal:
+        responses.insert(0, ChatResponse(messages=[Message("assistant", [json.dumps(_values())])]))
+    respond = create_autospec(judge_module.get_final_response, side_effect=responses)
+    monkeypatch.setattr(judge_module, "get_final_response", respond)
+    async with _judge(monkeypatch, [], formal=formal) as (judge, _):
+        # The reasoning stage uses Direct with transport auditing enabled, too.
+        judge._transport_audit_enabled = True
+        verdict = await _evaluate(judge)
+        assert verdict.approved is True
+        assert respond.await_count == (2 if formal else 1)
+        if formal:
+            assert verdict.audit["transport_count_available"] is False
+            assert verdict.audit["application_attempts"] == 2
+            assert all(call["transport_count_available"] is False for call in verdict.audit["calls"])
+    assert client.closed
+
+
+async def test_openai_sdk_transport_contract(monkeypatch):
+    async with _judge(monkeypatch, []) as (judge, _):
+        client = await judge._get_client()
+        transport = getattr(client.client, "_client", None)
+        assert isinstance(transport, httpx.AsyncClient), "Revisit transport auditing after an OpenAI SDK change"
+        assert transport.event_hooks["request"].count(judge_module._count_transport_request) == 1
 
 
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test"])

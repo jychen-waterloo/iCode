@@ -26,7 +26,9 @@ Set `formal_enabled: true` on the selected approval-judge model profile to enabl
 
 Any `true` keeps the existing human approval dialog open without calling the second stage. With no true (all false, mixed false/unknown, or all unknown), the second stage uses iCode's existing approval prompt and the main agent's configured model. Configure that main model as the reasoning LLM you want, with its usual reasoning/chat options; Jev cannot be the second-stage chat model. Workflow nodes use their effective agent model, falling back to the run model. Only a second-stage `approved: true` automatically approves.
 
-Predicates are independent: an explicitly requested `git push` still has `external_action=true`, although `scope_escalation` may be false, so Formal requires human approval. Both stages and retries share the approval-judge profile's total timeout. Asset/model errors and exhausted retries require human handling; cancellation stays cancellation. Existing audit records include stages, predicate values, model profiles and call counts.
+Predicates are independent: an explicitly requested `git push` still has `external_action=true`, although `scope_escalation` may be false, so Formal requires human approval. Both stages and all retries share one total time budget, taken from the approval-judge profile's `http_read_timeout` in seconds (default: `300` when omitted). Set a positive value; `0` or a negative value immediately requires human approval instead of disabling the timeout. Asset/model errors and exhausted retries require human handling; cancellation stays cancellation. Existing audit records include stages, predicate values, model profiles and call counts.
+
+If required input is missing (including an empty tool kind), Formal requests human approval without calling either model. The audit records `failure_reason="invalid_input"`; an unusable time budget records `failure_reason="timeout"`.
 
 `formal_enabled: false` keeps the original Direct behavior. Read-only fast paths and approval priority are unchanged; these rules apply only to calls that reach Formal.
 

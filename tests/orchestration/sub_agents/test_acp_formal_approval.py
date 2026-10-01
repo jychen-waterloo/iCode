@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Chrys. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Formal input validation leaves ACP permission requests open for human approval."""
 
@@ -12,7 +12,8 @@ from acp.schema import PermissionOption, ToolCallUpdate
 
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.events.types import ApprovalRequest, ApprovalResponse, ApprovalReviewed
-from chrys.orchestration.invoker.acp_protocol import AcpPermissionBroker
+from chrys.foundation.models.invocations import InvocationOrigin
+from chrys.orchestration.invoker.acp_protocol import AcpPermissionBroker, AcpUpdateTranslator
 from chrys.service.approval.judge import ApprovalJudge
 from chrys.service.approval.policy import ApprovalMode
 from chrys.service.approval.turn_context import TurnContextHolder
@@ -53,6 +54,15 @@ async def test_invalid_formal_context_waits_for_human_allow(monkeypatch, kind, m
         approval_judge=judge,
         ask_user_timeout_seconds=None,
     )
+    translator = AcpUpdateTranslator(
+        event_bus=bus,
+        session_id="parent",
+        agent_name="External",
+        invocation_id="inv",
+        attempt=1,
+        origin=InvocationOrigin("sub_agent", "parent", "inv", None),
+    )
+    broker.set_translator(translator)
     async with capture_event_sequence(bus, ApprovalRequest, ApprovalReviewed) as events:
         task = asyncio.create_task(
             broker.on_permission_request(
@@ -80,6 +90,14 @@ async def test_invalid_formal_context_waits_for_human_allow(monkeypatch, kind, m
             decision = await asyncio.wait_for(task, timeout=5)
             assert decision.action == "allow"
             assert decision.option_id == "allow"
+            reviews = [
+                item["update"]
+                for item in translator.translated_updates
+                if item["update"]["sessionUpdate"] == "permission_review"
+            ]
+            assert len(reviews) == 1
+            assert reviews[0]["request_id"] == request.request_id
+            assert reviews[0]["formal_audit"]["failure_reason"] == "invalid_input"
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

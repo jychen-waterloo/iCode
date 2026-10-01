@@ -558,7 +558,7 @@ class ApprovalJudge:
                     "glm-openai",
                 }:
                     # SDK boundary: count requests on the owned provider transport.
-                    transport = self._client.client._client
+                    transport = getattr(self._client.client, "_client", None)
                     if isinstance(transport, httpx.AsyncClient):
                         if _count_transport_request not in transport.event_hooks["request"]:
                             transport.event_hooks["request"].append(_count_transport_request)
@@ -608,6 +608,7 @@ class ApprovalJudge:
                 log_dir=log_dir,
                 user_messages=user_messages,
             )
+        audit = _FormalAuditState(request_id=request_id, log_dir=log_dir, deadline=time.monotonic())
         valid_request = _valid_request(
             user_message=user_message,
             user_messages=user_messages,
@@ -617,15 +618,21 @@ class ApprovalJudge:
             workspace_roots=workspace_roots,
         )
         if not valid_request:
-            return JudgeVerdict(approved=False, reason="Approval judge input is invalid")
+            audit.failure_reason = "invalid_input"
+            return self._finalize_formal_verdict(
+                log_dir, audit, approved=False, reason="Approval judge input is invalid"
+            )
         args = copy.deepcopy(args)
         workspace_roots = list(workspace_roots)
         user_messages = list(user_messages) if user_messages is not None else None
         started_at = time.monotonic()
         total_timeout = self._profile.http_read_timeout
         if total_timeout is None or total_timeout <= 0:
-            return JudgeVerdict(approved=False, reason="Approval judge time budget exhausted")
-        audit = _FormalAuditState(request_id=request_id, log_dir=log_dir, deadline=started_at + total_timeout)
+            audit.failure_reason = "timeout"
+            return self._finalize_formal_verdict(
+                log_dir, audit, approved=False, reason="Approval judge time budget exhausted"
+            )
+        audit.deadline = started_at + total_timeout
         try:
             asset = self._predicate_asset if self._predicate_asset is not None else load_default_asset()
         except OSError, PredicateAssetError:
