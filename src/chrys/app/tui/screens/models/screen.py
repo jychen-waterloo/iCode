@@ -1892,6 +1892,7 @@ class ModelConfigScreen(BaseDialog[str]):
 
         headers = self._read_kv_list("mc-headers-list")
         options = self._read_kv_list("mc-options-list")
+        saved_profile = self._registry.get(self._selected_profile_id)
         provider = str(self.query_one("#mc-provider", Select).value)
         api_style_value = str(self.query_one("#mc-api-style", Select).value)
         api_style = (
@@ -1917,6 +1918,7 @@ class ModelConfigScreen(BaseDialog[str]):
             chat_options=_kv_to_json(options),
             stream=self.query_one("#mc-stream", Checkbox).value,
             vision=self.query_one("#mc-vision", Checkbox).value,
+            formal_enabled=saved_profile.formal_enabled if saved_profile else False,
         )
 
     async def _save_only(self) -> ModelProfile | None:

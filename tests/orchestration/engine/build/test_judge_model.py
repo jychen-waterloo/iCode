@@ -74,7 +74,8 @@ async def test_a_judge_without_a_model_of_its_own_runs_on_the_agents_model(
     assert engine.current.loaded.approval_judge.profile == expected
 
 
-async def test_a_judge_with_a_model_of_its_own_keeps_it(agent_engine, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("formal", [False, True])
+async def test_a_judge_with_a_model_of_its_own_keeps_it(agent_engine, monkeypatch: pytest.MonkeyPatch, formal) -> None:
     import chrys.orchestration.engine.build.builder as builder_module
 
     monkeypatch.setattr(
@@ -83,15 +84,21 @@ async def test_a_judge_with_a_model_of_its_own_keeps_it(agent_engine, monkeypatc
         create_autospec(builder_module.create_client, return_value=MockChatClient(responses=[])),
     )
     profile = replace(_profile("Code"), model=ModelConfig(profile_id=_PINNED.id))
+    judge_profile = replace(_JUDGE, formal_enabled=formal)
     engine = agent_engine(
         EventBus(),
         settings=Settings(approval_judge_model_profile=_JUDGE.id),
         agent_registry=_registry(profile),
-        model_registry=_model_registry(_PINNED, _OTHER, _JUDGE),
+        model_registry=_model_registry(_PINNED, _OTHER, judge_profile),
     )
 
     await engine.start(profile)
 
     assert engine.current.loaded is not None
     assert engine.active_model_profile == _PINNED
-    assert engine.current.loaded.approval_judge.profile == _JUDGE
+    judge = engine.current.loaded.approval_judge
+    assert judge.profile == judge_profile
+    if formal:
+        assert judge._reasoning_judge.profile == _PINNED
+    else:
+        assert judge._reasoning_judge is None

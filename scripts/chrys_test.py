@@ -181,6 +181,7 @@ _REMINDER_GOLDENS = ("tests/service/agent_middleware/reminder_goldens/**",)
 # those dependency edges explicit: subprocess fixtures, filesystem scanners,
 # and import-every-module checks are invisible to the AST import graph.
 REGULAR_RULES = (
+    TestRule("tests/service/approval/test_formal_jev_core.py", ("src/chrys/service/approval/principles.json",)),
     TestRule("tests/service/acp_client", ("tests/support/acp_stub_agent.py",)),
     TestRule("tests/orchestration/sub_agents/test_acp_engine.py", ("tests/support/acp_stub_agent.py",)),
     TestRule("tests/service/workflows/test_protocol.py", _WORKFLOW_WORKER_HOST),
