@@ -11,7 +11,7 @@ from enum import StrEnum
 from importlib.resources import files
 from typing import Any, Literal
 
-_DECISION_VERSION = "three-valued-or-v1"
+_DECISION_VERSION = "three-valued-or-v2"
 _MAX_PRINCIPLES = 32
 _MAX_TEXT_LENGTH = 4_000
 
@@ -23,6 +23,7 @@ class PredicateAssetError(ValueError):
 
 
 class PredicateDecision(StrEnum):
+    ALLOW = "allow"
     REASONING = "reasoning"
     NEEDS_REVIEW = "needs_review"
 
@@ -134,7 +135,7 @@ def validate_predicate_response(text: str, asset: PredicateAsset) -> tuple[Predi
 
 
 def decide_predicates(values: tuple[PredicateValue, ...], asset: PredicateAsset) -> PredicateEvaluation:
-    """Any true requires human review; false/unknown proceeds to reasoning."""
+    """Any true requires review; all false allows; otherwise use reasoning."""
     if (
         len(values) != len(asset.principles)
         or {value.id for value in values} != {principle.id for principle in asset.principles}
@@ -146,7 +147,11 @@ def decide_predicates(values: tuple[PredicateValue, ...], asset: PredicateAsset)
         return PredicateEvaluation(
             PredicateDecision.NEEDS_REVIEW, f"Requires human review: {', '.join(triggered)}.", values
         )
-    return PredicateEvaluation(PredicateDecision.REASONING, "No predicate is true; reasoning review required.", values)
+    if all(value.value is False for value in values):
+        return PredicateEvaluation(PredicateDecision.ALLOW, "All predicates are false; automatically approved.", values)
+    return PredicateEvaluation(
+        PredicateDecision.REASONING, "No predicate is true, but some are unknown; reasoning review required.", values
+    )
 
 
 def evaluate_predicate_response(text: str, asset: PredicateAsset) -> PredicateEvaluation:

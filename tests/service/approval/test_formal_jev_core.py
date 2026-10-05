@@ -167,12 +167,46 @@ async def test_any_true_requires_review_without_reasoning(monkeypatch, model, tr
 
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test", "~typesafe/jev-test"])
 @pytest.mark.parametrize(
+    "reasoning", [_REASONING, None, ModelProfile(id="jev", name="Jev", model_id="typesafe/jev-test")]
+)
+async def test_all_false_approves_without_reasoning(monkeypatch, tmp_path, model, reasoning):
+    values = _values()
+    async with _judge(monkeypatch, [_reply(values, model)], model=model, reasoning=reasoning) as (judge, calls):
+        verdict = await judge.evaluate(
+            "Inspect source",
+            "read_file",
+            "filesystem.read",
+            {"path": "main.py"},
+            ["/workspace"],
+            request_id="safe",
+            log_dir=tmp_path,
+        )
+        assert verdict.approved is True
+        assert verdict.audit["approved"] is True
+        assert verdict.audit["decision_version"] == "three-valued-or-v2"
+        assert verdict.audit["stages"] == ["predicate"]
+        assert verdict.audit["failure_reason"] is None
+        assert verdict.audit["application_attempts"] == verdict.audit["transport_attempts"] == len(calls) == 1
+        assert verdict.audit["usage"]["total_token_count"] == 5
+        assert verdict.audit["predicate_results"] == [{"id": key, "value": False} for key in values]
+        assert judge._reasoning_judge is None or judge._reasoning_judge._client is None
+        saved = json.loads((tmp_path / "safe.formal.jsonl").read_text())
+        assert saved == {
+            **{key: value for key, value in verdict.audit.items() if key != "calls"},
+            "calls_file": "safe.calls.jsonl",
+        }
+
+
+@pytest.mark.parametrize("model", ["test", "typesafe/jev-test", "~typesafe/jev-test"])
+@pytest.mark.parametrize(
     "values",
-    [_values(), _values() | {"external_action": "unknown"}, _values("unknown")],
-    ids=["all-false", "mixed", "all-unknown"],
+    [_values() | {"external_action": "unknown"}, _values("unknown")],
+    ids=["mixed", "all-unknown"],
 )
 @pytest.mark.parametrize("approved", [False, True])
-async def test_no_true_uses_main_reasoning_profile_and_direct_verdict(monkeypatch, model, values, approved):
+async def test_unknown_without_true_uses_main_reasoning_profile_and_direct_verdict(
+    monkeypatch, model, values, approved
+):
     replies = [_reply(values, model), json.dumps({"approved": approved, "reason": "reasoning verdict"})]
     async with _judge(monkeypatch, replies, model=model) as (judge, calls):
         verdict = await judge.evaluate(
@@ -292,7 +326,7 @@ async def test_unavailable_sdk_transport_does_not_block_judging(monkeypatch, for
     monkeypatch.setattr(clients, "create_client", create_autospec(clients.create_client, return_value=client))
     responses = [ChatResponse(messages=[Message("assistant", ['{"approved":true,"reason":"ok"}'])])]
     if formal:
-        responses.insert(0, ChatResponse(messages=[Message("assistant", [json.dumps(_values())])]))
+        responses.insert(0, ChatResponse(messages=[Message("assistant", [json.dumps(_values("unknown"))])]))
     respond = create_autospec(judge_module.get_final_response, side_effect=responses)
     monkeypatch.setattr(judge_module, "get_final_response", respond)
     async with _judge(monkeypatch, [], formal=formal) as (judge, _):
@@ -318,7 +352,9 @@ async def test_openai_sdk_transport_contract(monkeypatch):
 
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test"])
 async def test_empty_latest_message_uses_shared_user_context(monkeypatch, model):
-    async with _judge(monkeypatch, [_reply(_values(), model), '{"approved":true,"reason":"ok"}'], model=model) as (
+    async with _judge(
+        monkeypatch, [_reply(_values("unknown"), model), '{"approved":true,"reason":"ok"}'], model=model
+    ) as (
         judge,
         calls,
     ):
@@ -391,27 +427,27 @@ def test_predicates_reject_invalid_fenced_response(response):
         validate_predicate_response(response, load_default_asset())
 
 
-@pytest.mark.parametrize("needs_review", [False, True], ids=["approve", "human-review"])
-async def test_fenced_formal_response_routes_without_parse_retry(monkeypatch, needs_review):
-    values = _values() | {"external_action": needs_review}
+@pytest.mark.parametrize("value", [False, True, "unknown"], ids=["approve", "human-review", "reasoning"])
+async def test_fenced_formal_response_routes_without_parse_retry(monkeypatch, value):
+    values = _values() | {"external_action": value}
     replies = [f"```json\n{json.dumps(values)}\n```"]
-    if not needs_review:
+    if value == "unknown":
         replies.append('{"approved":true,"reason":"ok"}')
     async with _judge(monkeypatch, replies) as (judge, calls):
         verdict = await _evaluate(judge)
-        assert verdict.approved is not needs_review
+        assert verdict.approved is (value is not True)
         assert (
             verdict.audit["application_attempts"]
             == verdict.audit["transport_attempts"]
             == len(calls)
-            == (1 if needs_review else 2)
+            == (2 if value == "unknown" else 1)
         )
         assert verdict.audit["predicate_results"] == [{"id": key, "value": value} for key, value in values.items()]
 
 
 @pytest.mark.parametrize("reasoning", [None, ModelProfile(id="jev", name="Jev", model_id="typesafe/jev-test")])
 async def test_missing_or_jev_reasoning_profile_requires_human(monkeypatch, reasoning):
-    async with _judge(monkeypatch, [json.dumps(_values())], reasoning=reasoning) as (judge, calls):
+    async with _judge(monkeypatch, [json.dumps(_values("unknown"))], reasoning=reasoning) as (judge, calls):
         verdict = await _evaluate(judge)
         assert verdict.approved is False
         assert verdict.audit["failure_reason"] == "reasoning_profile_unavailable"
@@ -483,7 +519,7 @@ async def test_stage_failure_requires_human(monkeypatch, stage, error):
     replies = (
         [error]
         if stage == "predicate"
-        else [ChatResponse(messages=[Message("assistant", [json.dumps(_values())])]), error]
+        else [ChatResponse(messages=[Message("assistant", [json.dumps(_values("unknown"))])]), error]
     )
     monkeypatch.setattr(
         judge_module, "get_final_response", create_autospec(judge_module.get_final_response, side_effect=replies)
@@ -544,7 +580,7 @@ async def test_stages_share_deadline_and_reject_late_approval(monkeypatch):
     async def response(client, messages, *, stream, options, timeout):
         reasoning = messages[0].text == _SYSTEM_PROMPT
         clock[0] = 106.0 if reasoning else 104.0
-        result = {"approved": True, "reason": "late"} if reasoning else _values()
+        result = {"approved": True, "reason": "late"} if reasoning else _values("unknown")
         return ChatResponse(messages=[Message("assistant", [json.dumps(result)])])
 
     fake_time = ModuleType("time")
@@ -612,7 +648,7 @@ async def test_concurrent_requests_keep_context_and_audits_separate(monkeypatch,
 
 
 async def test_cancelled_close_drains_both_clients_once(monkeypatch):
-    async with _judge(monkeypatch, [json.dumps(_values()), '{"approved":true,"reason":"ok"}']) as (judge, _):
+    async with _judge(monkeypatch, [json.dumps(_values("unknown")), '{"approved":true,"reason":"ok"}']) as (judge, _):
         assert (await _evaluate(judge)).approved is True
         entered, release = asyncio.Event(), asyncio.Event()
         client = judge._client

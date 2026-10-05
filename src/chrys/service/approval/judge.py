@@ -489,8 +489,8 @@ def _assistant_retry_messages(response: Any, fallback_text: str) -> list[Message
 class ApprovalJudge:
     """Judge tool calls with a resolved model profile.
 
-    Formal sends any true predicate to human review; otherwise the configured
-    reasoning model uses the existing Direct verdict path. Both retry invalid responses.
+    Formal sends any true predicate to human review and approves all false.
+    Otherwise the reasoning model uses Direct. Both stages retry invalid responses.
     """
 
     def __init__(
@@ -593,7 +593,7 @@ class ApprovalJudge:
         log_dir: Path | None = None,
         user_messages: list[str] | None = None,
     ) -> JudgeVerdict:
-        """Route Formal predicates to human review or the existing Direct judge."""
+        """Route Formal predicates to approval, human review, or the Direct judge."""
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise asyncio.CancelledError
@@ -667,6 +667,8 @@ class ApprovalJudge:
                 raise TimeoutError
             if predicate.decision is PredicateDecision.NEEDS_REVIEW:
                 return self._finalize_formal_verdict(log_dir, audit, approved=False, reason=predicate.reason)
+            if predicate.decision is PredicateDecision.ALLOW:
+                return self._finalize_formal_verdict(log_dir, audit, approved=True, reason=predicate.reason)
             if self._reasoning_judge is None or is_jev_profile(self._reasoning_judge.profile):
                 audit.failure_reason = "reasoning_profile_unavailable"
                 return self._finalize_formal_verdict(
@@ -741,7 +743,7 @@ class ApprovalJudge:
                 result = evaluate_predicate_response(text, asset)
             except PredicateAssetError:
                 result = None
-            verdict = JudgeVerdict(False, result.reason) if result else None
+            verdict = JudgeVerdict(result.decision is PredicateDecision.ALLOW, result.reason) if result else None
             self._write_log(log_path, attempt, messages, text, verdict)
             if result is not None:
                 return result

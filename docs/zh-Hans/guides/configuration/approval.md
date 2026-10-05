@@ -24,7 +24,7 @@
 
 在选中的 approval-judge 模型配置中设置 `formal_enabled: true`，启用两阶段审批。第一阶段使用该 profile（普通 LLM 或 Jev），在一次请求中批量判断七个谓词，并传入完整定义、例子和例外。每个 ID 必须返回 JSON `true`、`false` 或 `"unknown"`；unknown 表示现有输入不足。缺失、重复、多余 ID 或非法响应会重试，不会补成 unknown。
 
-任一谓词为 `true`，保留现有人工审批对话框，不调用第二阶段。没有 true 时（全 false、false/unknown 混合、全 unknown），使用 iCode 原有审批 prompt 和主 agent 已配置的普通模型进行第二阶段判断。请将主模型配置为所需的 reasoning LLM，并设置其原有 reasoning/chat options；Jev 不能充当第二阶段聊天模型。Workflow 节点使用自身实际模型，没有节点模型时使用运行模型。只有第二阶段明确返回 `approved: true` 才自动批准。
+任一谓词为 `true`，保留现有人工审批对话框，不调用第二阶段。全部为 `false` 时直接自动批准，无需人工操作，也不调用第二阶段，即使未配置 reasoning 模型也可放行。只有没有 `true` 且至少有一个 `"unknown"` 时，才使用 iCode 原有审批 prompt 和主 agent 已配置的普通模型进行第二阶段判断。请将主模型配置为所需的 reasoning LLM，并设置其原有 reasoning/chat options；Jev 不能充当第二阶段聊天模型。Workflow 节点使用自身实际模型，没有节点模型时使用运行模型。在第二阶段，只有明确返回 `approved: true` 才自动批准。
 
 各谓词独立：即使用户明确要求 `git push`，`external_action` 仍为 true，`scope_escalation` 可以为 false，整体仍转人工。两阶段及所有重试共用一个总超时预算，取自 approval-judge profile 的 `http_read_timeout`，单位为秒（省略时默认为 `300`）。请设置正数；`0` 或负数会立即转人工审批，并不表示禁用超时。资产错误、模型错误和重试耗尽转人工；取消仍按取消处理。原有审计记录包含阶段、谓词结果、模型 profile 和调用次数。
 
