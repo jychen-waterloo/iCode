@@ -4,13 +4,27 @@ This tutorial shows how to install iCode, configure a model, and use agents to c
 
 ## 1. Install iCode
 
-iCode provides prebuilt offline installation packages for macOS, Linux, and Windows. The packages include Python and runtime dependencies, so you do not need to install Python separately.
+Install iCode with [uv](https://docs.astral.sh/uv/getting-started/installation/). If Python 3.14 is not on your system, uv downloads it for you:
 
-Download the latest version from [iCode Releases](https://github.com/0x7c13/chrys/releases). Do not run `pip install chrys` at this time: that name belongs to a different project on PyPI.
+```shell
+uv tool install iCode-TUI
+```
+
+To upgrade later, run `uv tool upgrade iCode-TUI`; to remove iCode, run `uv tool uninstall iCode-TUI`.
+
+Windows (x64) and Linux (x86-64 or ARM64, glibc 2.27 or later) need nothing else. On a Mac with Apple silicon, first install the Xcode Command Line Tools with `xcode-select --install`; uv uses them to build one dependency during installation.
+
+If you used an iCode offline package before, remove it first. Delete the folder it unpacked into: `~/Library/Application Support/pyapp/chrys` on macOS, `~/.local/share/pyapp/chrys` on Linux (or `$XDG_DATA_HOME/pyapp/chrys` if you set `XDG_DATA_HOME`), or `%LOCALAPPDATA%\pyapp\data\chrys` on Windows. Then delete `~/.local/bin/chrys` on macOS or Linux, or the `%LOCALAPPDATA%\chrys\bin` folder on Windows.
+
+If uv reports that `icode` already exists, an earlier iCode offline install or another program with the same name is in the way. If it is iCode, run `uv tool install --force iCode-TUI` to replace it.
+
+### Offline packages
+
+On an Intel Mac, Windows on Arm, an older Linux, or a device without internet access, use the prebuilt offline packages from [iCode Releases](https://github.com/openJiuwen-ai/iCode/releases) instead. The packages include Python and every dependency, so you do not need to install Python separately.
 
 In the commands below, `<version>` and `<architecture>` are placeholders. Replace them with the actual values in the downloaded filename.
 
-### macOS
+#### macOS
 
 Choose `icode-macos-aarch64-v<version>-offline.tar.gz` for Apple silicon or `icode-macos-x86_64-v<version>-offline.tar.gz` for Intel, then run the following in your download directory:
 
@@ -20,7 +34,7 @@ chmod +x ./icode
 ./icode install
 ```
 
-### Linux
+#### Linux
 
 Choose `icode-linux-x86_64-v<version>-offline.tar.gz` or `icode-linux-aarch64-v<version>-offline.tar.gz` for your processor, then run the following in your download directory:
 
@@ -32,9 +46,9 @@ chmod +x ./icode
 
 The Linux x86-64 package requires glibc 2.17 or later, and the ARM64 package requires glibc 2.18 or later. Distributions that provide only musl, such as Alpine Linux, are not supported by the prebuilt packages.
 
-### Windows
+#### Windows
 
-Download and extract `icode-windows-x86_64-v<version>-offline.zip`. Open PowerShell, go to the extracted directory, and run:
+Download and extract `icode-windows-x86_64-v<version>-offline.zip`, or `icode-windows-aarch64-v<version>-offline.zip` on Windows on Arm. Open PowerShell, go to the extracted directory, and run:
 
 ```powershell
 .\icode.exe install
@@ -48,7 +62,9 @@ The installer attempts to add iCode to the current user's `PATH`. Open a new ter
 icode --version
 ```
 
-The command should print the iCode version number. If your system cannot find `icode` on macOS or Linux, add `~/.local/bin` to `PATH` as the installer instructs. If the installer reported that `~/.local/bin/icode` already exists, that command starts another program; use `chrys` instead. On Windows, open a new terminal; if the installer reported that updating the user PATH failed, add `%LOCALAPPDATA%\chrys\bin` to your user `PATH` manually.
+The command should print the iCode version number. If you installed with uv and your terminal cannot find `icode`, run `uv tool update-shell` and open a new terminal.
+
+With an offline package, if your system cannot find `icode` on macOS or Linux, add `~/.local/bin` to `PATH` as the installer instructs. If the installer reported that `~/.local/bin/icode` already exists, that command starts another program; use `chrys` instead. On Windows, open a new terminal; if the installer reported that updating the user PATH failed, add `%LOCALAPPDATA%\chrys\bin` to your user `PATH` manually.
 
 ## 2. Start iCode in a project
 
@@ -109,8 +125,6 @@ Analyze the task list implementation and propose a plan for adding a "Clear comp
 
 Q&A Agent may search for files, read their contents, or run read-only commands. Tool calls appear as cards. After completing its analysis, the agent presents an implementation plan.
 
-Your messages and the agent's replies are shown with Markdown formatting. To copy a message exactly as it was written, click **copy** next to its header. Text you select with the mouse is copied as it is displayed.
-
 ### Use Code Agent
 
 Code Agent handles tasks that require **modifying files, running commands, and validating results**. It reads the relevant code first, then implements, debugs, or refactors it as requested.
@@ -124,6 +138,20 @@ Implement the "Clear completed tasks" feature using the plan we just discussed. 
 If an approval dialog appears, review the tool call before approving it. Pay particular attention to the command, target files, and scope of its effects, and approve only when they match your expectations. For the behavior of each approval mode, see [Configure approval modes](../guides/configuration/approval.md).
 
 When the task is complete, review the agent's final response and use `/diff` to browse the file changes recorded in the current session. Then use Git or another version control tool to inspect the complete working directory changes. Confirm that the feature works correctly, the necessary tests pass, and there are no unrelated changes. Once you have verified the changes, you can commit them.
+
+### Read and copy replies
+
+All agents' replies support Markdown, formulas and Mermaid diagrams. Formulas in your own messages are not rendered as math.
+
+Lists and quotes can contain headings, tables, code and formulas.
+
+Single-line math is written with `$...$` or `\(...\)`. Display formulas in `math` code blocks, `$$...$$` or `\[...\]` can show fractions, matrices and aligned equations. Ordinary text, prices and shell variables keep their Markdown formatting. Formulas that are unsupported or too wide are shown as complete, wrapped source.
+
+For example, `$x^{n+1}$` displays as xⁿ⁺¹ and `$90^\circ$` as 90°.
+
+Mermaid code blocks appear as diagrams; choose **Open full diagram** to view and scroll the full result. Some diagrams are simplified with a notice; unsupported diagrams stay as source.
+
+Mouse selection copies what is displayed, without adding newlines for screen wrapping. Use **copy** beside the message header to copy the original Markdown and LaTeX. Reopening an older conversation uses the current rendering.
 
 ## 5. End the session
 

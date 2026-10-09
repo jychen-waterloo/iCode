@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import uuid4
 
 from chrys.foundation.i18n import MessageRef
+from chrys.foundation.models.approval_reuse import ApprovalReuseOffer, ReuseChoice
 from chrys.foundation.models.ask_user import AskUserAnswer, AskUserQuestion
 from chrys.foundation.models.execution import ExecutionSnapshot
 from chrys.foundation.models.invocations import InvocationOrigin
@@ -231,6 +232,7 @@ class ApprovalResponse(Event):
     approved: bool = False
     reason: str = ""
     modified_args: dict[str, Any] | None = None
+    remember_choice: ReuseChoice = ""
 
 
 @dataclass
@@ -564,7 +566,10 @@ class InvocationCompactionCommitted(InvocationEvent):
 
 @dataclass
 class InvocationRetryAttempt(InvocationEvent):
-    """Executor is retrying a transient error (published before each retry sleep)."""
+    """Executor is retrying a transient error (published before each retry sleep).
+
+    Also announces the one resend after a context overflow, which compacts first.
+    """
 
     agent_name: str = ""
     message: str = ""
@@ -683,11 +688,14 @@ class ApprovalRequest(Event):
     user_message: str = ""
     workspace_roots: list[str] = field(default_factory=list)
     workspace_cwd: str = ""
+    reuse_offer: ApprovalReuseOffer | None = None
     judging: bool = False
     """True when an LLM reviewer is concurrently evaluating this request.
 
-    The TUI shows the "Evaluating" spinner on arrival and waits for an
-    ``ApprovalReviewed`` event to update the dialog.
+    An ``ApprovalReviewed`` follows unless the wait ends first. A frontend may
+    hold the request out of sight until then and ask the user only when the
+    verdict flags it (the ACP server always does; the TUI does by default), or
+    show it at once with an "Evaluating" spinner.
     """
 
 

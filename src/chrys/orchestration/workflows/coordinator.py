@@ -44,6 +44,7 @@ from chrys.foundation.events.types import (
 )
 from chrys.foundation.models.workflow_session import WorkflowSessionSelection
 from chrys.foundation.platform import get_platform
+from chrys.foundation.platform.files import surrogate_safe_text
 from chrys.foundation.trajectory.ids import new_analytics_id
 from chrys.foundation.util.once_close import finish_close
 from chrys.orchestration.engine.execution import WorkflowExecution
@@ -57,6 +58,7 @@ from chrys.orchestration.workflows.preview import (
     load_workflow,
     materialize_runtime_sdk,
     prepare_workflow_environment,
+    worker_bytecode_cache_dir,
 )
 from chrys.orchestration.workflows.runner import WorkerCallbacks, WorkflowRunner, WorkflowRunResult
 from chrys.orchestration.workflows.session import (
@@ -108,6 +110,7 @@ REJECT_ENVIRONMENT_CHANGED: Final = "environment_changed"
 REJECT_STORAGE_FAILED: Final = "storage_failed"
 REJECT_INTERNAL_ERROR: Final = "internal_error"
 REJECT_WORKSPACE_LOCKED: Final = "workspace_locked"
+REJECT_WORKING_DIR_MISSING: Final = "working_dir_missing"
 
 MAX_REMEMBERED_REPLIES: Final = 256
 MAX_REMEMBERED_RESULTS: Final = 16
@@ -580,6 +583,11 @@ class WorkflowCoordinator:
         ):
             raise _Rejection(REJECT_SPEC_CHANGED, "This session belongs to another workflow. Start a new session.")
         workspace = owner.require_workspace()
+        if (missing := workspace.missing_primary()) is not None:
+            raise _Rejection(
+                REJECT_WORKING_DIR_MISSING,
+                f"The working directory no longer exists: {surrogate_safe_text(missing)}.",
+            )
         config_dir = self._config_dir()
         project_cwd = Path(workspace.primary_cwd)
         settings = await self._load_run_settings(project_cwd, request_id=event.request_id)
@@ -606,7 +614,7 @@ class WorkflowCoordinator:
             # Confirm the bytes before probing it; its fingerprint can only be checked after that probe.
             ledger = await asyncio.to_thread(ConfirmationLedger, ledger_path(config_dir))
             recorded = ledger.recorded(source.canonical_path, source.source_kind)
-            if recorded is None or recorded.entry_digest != source.entry_sha256:
+            if recorded is None or recorded.entry_digest != source.source_digest:
                 raise _not_confirmed(source)
         try:
             sdk = await materialize_runtime_sdk(config_dir)
@@ -628,6 +636,7 @@ class WorkflowCoordinator:
                 environment=environment,
                 sdk=sdk,
                 workspace=project_cwd,
+                bytecode_cache=worker_bytecode_cache_dir(config_dir),
                 ask_handler=callbacks.ask,
                 emit_handler=callbacks.emit,
             )
@@ -676,7 +685,7 @@ class WorkflowCoordinator:
                 canonical_path=source.canonical_path,
                 title=admitted.graph.title,
                 input_excerpt=event.input_text,
-                entry_digest=loaded.load.entry_digest,
+                entry_digest=source.source_digest,
                 manifest_digest=loaded.load.manifest_digest,
                 schema_version=loaded.manifest["schema_version"],
                 spec_digest=loaded.spec_digest,

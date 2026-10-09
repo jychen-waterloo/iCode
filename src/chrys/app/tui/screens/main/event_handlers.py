@@ -106,6 +106,7 @@ from chrys.foundation.events.types import (
 from chrys.foundation.hosted_tools import HostedToolStatus, normalize_hosted_tool_status
 from chrys.foundation.i18n import DisplayBlock, MessageRef, msg
 from chrys.foundation.i18n.formatting import format_message
+from chrys.foundation.models.approval_reuse import ReuseChoice
 from chrys.foundation.models.ask_user import AskUserAnswer
 from chrys.foundation.tool_result_metadata import canonical_tool_result_status
 from chrys.orchestration.engine.run.attachments import replace_image_mentions_with_paths
@@ -116,6 +117,7 @@ from chrys.service.state.store import StateStore
 
 if TYPE_CHECKING:
     from chrys.app.tui.i18n import LocaleController
+    from chrys.app.tui.screens.main.workspace_actions import MissingDirReason
     from chrys.foundation.models.invocations import InvocationOrigin
 
 _IMAGE_ERROR_CODES = {"image_attachment_error", "vision_unsupported"}
@@ -125,11 +127,13 @@ _IMAGE_WARNING_CODES = {
     "image_attachment_while_running",
 }
 _SUBMIT_BLOCKING_WARNING_CODES = _IMAGE_WARNING_CODES | {"sub_agent_paused"}
+_WORKING_DIR_MISSING_CODE = "working_dir_missing"
 _SUBMIT_BLOCKING_ERROR_CODES = _IMAGE_ERROR_CODES | {
     "hook_blocked",
     "not_ready",
     "prompt_admission_conflict",
     "retry_missing_user_anchor",
+    _WORKING_DIR_MISSING_CODE,
 }
 _STALE_RUN_FILTERED_ERROR_CODES = {"executor_error", "retry_missing_user_anchor"}
 
@@ -189,24 +193,21 @@ class BackendEventCallbacks:
     set_agent_loading: Callable[[bool], None]
     set_has_messages: Callable[[bool], None]
     set_profile_display: Callable[[str], None]
-    set_runtime_details: Callable[[AgentRuntimeDetails], None]
     set_active_model_profile_id: Callable[[str], None]
-    set_main_usage_source_id: Callable[[str], None]
-    set_last_usage_tokens: Callable[[int], None]
-    set_last_total_session_tokens: Callable[[int], None]
     set_creating_new_session: Callable[[bool], None]
     set_restoring_session: Callable[[bool], None]
     set_workspace_cwd: Callable[[str], None]
-    set_workspace_original_cwd: Callable[[str | None], None]
     refresh_git_branch: Callable[[], None]
     update_subtitle: Callable[[], None]
     update_toc: Callable[[], None]
     on_session_fork_error: Callable[[Error, str, NotificationSeverity], None]
     on_session_clear_error: Callable[[Error, str], None]
-    block_pending_user_submit: Callable[[], None]
-    handle_approval_response: Callable[[str, bool, str, dict[str, object] | None], ApprovalResponseWorker | None]
+    handle_approval_response: Callable[
+        [str, bool, str, dict[str, object] | None, ReuseChoice], ApprovalResponseWorker | None
+    ]
     handle_ask_user_response: Callable[[str, tuple[AskUserAnswer, ...]], object]
     question_inline_preferred: Callable[[], bool]
+    approval_defer_while_judging: Callable[[], bool]
     post_gc_message: Callable[[GcAbsorbRequested | GcReclaimRequested], object]
     debug: Callable[[str, str], None]
     refresh_model_indicator: Callable[[], None]
@@ -215,6 +216,7 @@ class BackendEventCallbacks:
     settings_reloaded: Callable[[], None]
     accept_approval_update: Callable[[ApprovalModeUpdated], bool] = lambda _event: True
     route_session_error: Callable[[Error], bool] = lambda _event: False
+    prompt_missing_working_dir: Callable[[MissingDirReason], None] = lambda _reason: None
 
 
 def _usage_source_debug_suffix(source_id: str, *, main_source_id: str) -> str:
@@ -291,6 +293,7 @@ class BackendEventHandler:
                 publish_auto_fulfill_blocked=self._publish_auto_fulfill_blocked,
                 handle_ask_user_response=callbacks.handle_ask_user_response,
                 question_inline_preferred=callbacks.question_inline_preferred,
+                approval_defer_while_judging=callbacks.approval_defer_while_judging,
                 set_agent_loading=self.set_agent_loading,
             ),
         )
@@ -386,7 +389,6 @@ class BackendEventHandler:
     @runtime_metadata.setter
     def runtime_metadata(self, value: AgentRuntimeDetails) -> None:
         self._state.runtime.details = value
-        self._callbacks.set_runtime_details(value)
 
     @property
     def approval_mode(self) -> ApprovalMode:
@@ -403,7 +405,6 @@ class BackendEventHandler:
     @main_usage_source_id.setter
     def main_usage_source_id(self, value: str) -> None:
         self._state.runtime.main_usage_source_id = value
-        self._callbacks.set_main_usage_source_id(value)
 
     @property
     def creating_new_session(self) -> bool:
@@ -430,7 +431,6 @@ class BackendEventHandler:
     @last_usage_tokens.setter
     def last_usage_tokens(self, value: int) -> None:
         self._state.usage.last_usage_tokens = value
-        self._callbacks.set_last_usage_tokens(value)
 
     @property
     def last_total_session_tokens(self) -> int:
@@ -439,7 +439,6 @@ class BackendEventHandler:
     @last_total_session_tokens.setter
     def last_total_session_tokens(self, value: int) -> None:
         self._state.usage.last_total_session_tokens = value
-        self._callbacks.set_last_total_session_tokens(value)
 
     @property
     def context_usage_state(self) -> ContextUsageState | None:
@@ -462,7 +461,6 @@ class BackendEventHandler:
     @chdir_original_cwd.setter
     def chdir_original_cwd(self, value: str | None) -> None:
         self._state.workspace_marker.original_cwd = value
-        self._callbacks.set_workspace_original_cwd(value)
 
     @property
     def pending_user_submit_active(self) -> bool:
@@ -484,7 +482,6 @@ class BackendEventHandler:
 
     def block_pending_user_submit(self) -> None:
         self._state.submit.block()
-        self._callbacks.block_pending_user_submit()
 
     def notify(
         self,
@@ -1434,8 +1431,8 @@ class BackendEventHandler:
 
         The parent is normally still running (awaiting the sub-agent's
         tool call result), so in the happy path no gate is needed.  But
-        during a user interrupt the frontend flips ``_agent_running`` to
-        False BEFORE the backend cascade finishes, so a late
+        during a user interrupt the frontend flips the run state's
+        ``agent_running`` to False BEFORE the backend cascade finishes, so a late
         ``InvocationPaused`` that was already in-flight when interrupt
         fired can arrive after the UI has already torn the run down.
         Skipping it here keeps cards from flickering into a stale paused
@@ -1520,8 +1517,10 @@ class BackendEventHandler:
 
         The backend decides the mode: BYPASS never publishes this event at
         all, MANUAL publishes with ``judging=False``, AUTO publishes with
-        ``judging=True`` and will later emit an ``ApprovalReviewed`` to
-        update the dialog.  The TUI just displays what it's told.
+        ``judging=True`` and will later emit an ``ApprovalReviewed``. A
+        judging request waits unseen for that verdict while
+        ``ui.approval.defer_while_judging`` is on; otherwise its dialog opens
+        at once and the verdict updates it.
         """
         await self._approval().on_request(event)
 
@@ -1538,17 +1537,18 @@ class BackendEventHandler:
 
         - Approved pre-mount → skip the dialog entirely and continue to the
           next queued request; the backend already ran the tool.
-        - Flagged pre-mount → push the dialog and deliver the verdict after
-          mount so the concern is pre-populated instead of showing a stuck
-          "Evaluating" spinner.
+        - Flagged pre-mount → open the dialog already flagged, the concern
+          shown and the reason focused, never a stuck "Evaluating" spinner.
         """
         self._approval().show_next()
 
     async def on_approval_reviewed(self, event: ApprovalReviewed) -> None:
         """Deliver a judge verdict from the backend to the open dialog.
 
-        Three cases handled:
+        Four cases handled:
 
+        - Request deferred while judging → an approval drops it unseen; a
+          flag queues it to open already flagged.
         - Matching dialog is live and undismissed → deliver verdict
           immediately (approved auto-dismisses; flagged shows the concern).
         - Dialog not yet pushed but request still queued → stash the verdict;
@@ -1612,7 +1612,7 @@ class BackendEventHandler:
         # empty event as the main window, but that silently mis-routed any
         # caller that forgot to set ``usage_source_id`` and also misclassified
         # parent usage that arrived before SessionReady set
-        # ``_main_usage_source_id``.
+        # ``main_usage_source_id``.
         is_session_window = bool(s.main_usage_source_id) and (event.usage_source_id == s.main_usage_source_id)
         if is_session_window:
             s.last_usage_tokens = event.total_tokens
@@ -1871,6 +1871,12 @@ class BackendEventHandler:
             if event.code in _IMAGE_ERROR_CODES:
                 self._show_image_rejection_dialog(event.code, display_full)
                 s.debug("ImageAttachmentBlocked", full_msg.splitlines()[0][:80])
+                return
+            if event.code == _WORKING_DIR_MISSING_CODE:
+                # The draft goes back first; the folder prompt never writes to it.
+                restored = self._restore_pending_submit_text() is not None
+                self._callbacks.prompt_missing_working_dir("submit" if restored else "turn_end")
+                s.debug("Error", f"[{event.code}] {full_msg[:60]}")
                 return
             await self._show_pending_submit_error(event.code, display_full, raw_message=full_msg)
             return

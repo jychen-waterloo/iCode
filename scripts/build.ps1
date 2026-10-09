@@ -13,10 +13,18 @@
 #   PYTHON_DIST    - path to local python-build-standalone tarball (skips GitHub download)
 #   OFFLINE_DIST   - path to a prebuilt offline distribution (skips building one)
 #
-# By default the binary embeds Python plus the chrys wheel, and the chosen
+# By default the binary embeds Python plus the iCode wheel, and the chosen
 # installer fetches the dependencies from PyPI on first run.  With -Offline the
 # embedded distribution already contains chrys and every dependency, so the
 # first run only unpacks it - no installer, no PyPI, no network.
+#
+# On Windows on Arm, PyPI has no Arm64 wheels for cryptography and grpcio, so
+# they are built from source: use -Offline (the other flavors would build them
+# on the user's machine), with Visual Studio's ARM64 C++ tools installed and,
+# as CD does, OPENSSL_DIR naming a static OpenSSL (vcpkg's
+# openssl:arm64-windows-static-md), OPENSSL_STATIC=1 and UV_CACHE_DIR naming a
+# short folder such as C:\uv: uv builds inside its cache, and grpcio's deepest
+# object file then exceeds the 260 characters cl.exe can write.
 #
 # Output: dist\icode.exe
 
@@ -33,9 +41,24 @@ if ($UseUv -and $Offline) {
 }
 
 $PyAppVersion = if ($env:PYAPP_VERSION) { $env:PYAPP_VERSION } else { "0.29.0" }
-$PythonVersion = "3.14"
+# The binary ships the CPython version .python-version pins (the one CI tests
+# on), built by this python-build-standalone release; bump it together with
+# PYTHON_BUILD_STANDALONE_RELEASE in .github/workflows/cd.yml.
+$PythonBuildStandaloneRelease = "20261003"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Split-Path -Parent $ScriptDir
+$CPythonVersion = (Get-Content (Join-Path $ProjectRoot ".python-version") -Raw).Trim()
+if ($CPythonVersion -notmatch '^3\.\d+\.\d+$') {
+    throw ".python-version must pin a full CPython version, got '$CPythonVersion'"
+}
+$PythonVersion = $CPythonVersion -replace '\.\d+$', ''
+# The same machine detection as fetch_rg.ps1, so Python and the bundled ripgrep match.
+switch ($env:PROCESSOR_ARCHITECTURE.ToLower()) {
+    "amd64" { $Triple = "x86_64-pc-windows-msvc" }
+    "arm64" { $Triple = "aarch64-pc-windows-msvc" }
+    default { throw "Unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
+}
+$DistUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$PythonBuildStandaloneRelease/cpython-$CPythonVersion+$PythonBuildStandaloneRelease-$Triple-install_only_stripped.tar.gz"
 
 # Env-var paths may be relative to the caller's directory; resolve them before
 # any Set-Location so they survive the working-directory changes below.
@@ -48,8 +71,9 @@ foreach ($name in "PYAPP_SOURCE", "PYTHON_DIST", "OFFLINE_DIST") {
 
 Set-Location $ProjectRoot
 
-# Extract version from pyproject.toml
-$Version = uv run python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+# Extract version from pyproject.toml. --no-project: syncing the project here
+# would build its source-only dependencies without the offline build's pins.
+$Version = uv run --no-project python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
 if ($LASTEXITCODE -ne 0) { throw "Failed to extract version" }
 
 Write-Host "==> Building chrys v$Version (PyApp v$PyAppVersion)"
@@ -89,15 +113,15 @@ try {
     }
 
     $PyAppDir = Join-Path $BuildDir "pyapp-v$PyAppVersion"
-    $WheelSource = Join-Path "dist" "chrys-$Version-py3-none-any.whl"
+    $WheelSource = Join-Path "dist" "icode_tui-$Version-py3-none-any.whl"
     $WheelFile = Get-Item $WheelSource -ErrorAction SilentlyContinue
     if (-not $WheelFile) {
-        $WheelFile = Get-ChildItem "dist\chrys-*.whl" |
+        $WheelFile = Get-ChildItem "dist\icode_tui-*.whl" |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
     }
     if (-not $WheelFile) {
-        throw "No chrys wheel found in dist"
+        throw "No iCode wheel found in dist"
     }
     Copy-Item $WheelFile.FullName $PyAppDir
     Set-Location $PyAppDir
@@ -114,7 +138,7 @@ try {
     $env:PYAPP_EXEC_SPEC = "chrys.app.cli.app:pyapp_main"
     $env:PYAPP_SELF_COMMAND = "self"
     $env:PYAPP_PASS_LOCATION = "true"
-    # Never set by this script; a stale session value alongside
+    # Set below for installer builds only; a stale session value alongside
     # PYAPP_DISTRIBUTION_PATH would make PyApp's build.rs panic.
     $env:PYAPP_DISTRIBUTION_SOURCE = $null
 
@@ -132,19 +156,8 @@ try {
                 -Wheel (Join-Path $PyAppDir $Wheel) `
                 -Output (Join-Path $PyAppDir $OfflineArchive)
         } else {
-            # PyApp's build.rs pins one python-build-standalone URL per
-            # platform; read it back out so the offline distribution is built
-            # on exactly the interpreter this binary will ship.
-            $BuildRsText = Get-Content (Join-Path $PyAppDir "build.rs") -Raw
-            $DistMatch = [regex]::Matches(
-                $BuildRsText,
-                "https://[^`"]*cpython-$PythonVersion[^`"]*-x86_64-pc-windows-msvc-install_only_stripped[^`"]*"
-            )
-            if ($DistMatch.Count -eq 0) {
-                throw "No python-build-standalone URL for x86_64-pc-windows-msvc in build.rs"
-            }
             & "$ScriptDir\build_offline_dist.ps1" `
-                -DistUrl $DistMatch[0].Value `
+                -DistUrl $DistUrl `
                 -Wheel (Join-Path $PyAppDir $Wheel) `
                 -Output (Join-Path $PyAppDir $OfflineArchive)
         }
@@ -164,14 +177,12 @@ try {
         $env:PYAPP_DISTRIBUTION_SITE_PACKAGES_PATH = "Lib\site-packages"
 
         $env:PYAPP_PROJECT_PATH = $null
-        $env:PYAPP_PROJECT_FEATURES = $null
         $env:PYAPP_PIP_ALLOW_CONFIG = $null
         $env:PYAPP_DISTRIBUTION_EMBED = $null
         $env:PYAPP_UV_ENABLED = $null
         $env:PYAPP_DISTRIBUTION_PIP_AVAILABLE = $null
     } else {
         $env:PYAPP_PROJECT_PATH = $Wheel
-        $env:PYAPP_PROJECT_FEATURES = "tui,observability,doc_converter"
         $env:PYAPP_PIP_ALLOW_CONFIG = "true"
         $env:PYAPP_DISTRIBUTION_EMBED = "true"
         $env:PYAPP_SKIP_INSTALL = $null
@@ -196,6 +207,8 @@ try {
             $env:PYAPP_DISTRIBUTION_PATH = Split-Path -Leaf $env:PYTHON_DIST
             $env:PYAPP_DISTRIBUTION_PYTHON_PATH = "python/python.exe"
         } else {
+            # The pinned distribution, rather than the one PyApp's build.rs names.
+            $env:PYAPP_DISTRIBUTION_SOURCE = $DistUrl
             $env:PYAPP_DISTRIBUTION_PATH = $null
             $env:PYAPP_DISTRIBUTION_PYTHON_PATH = $null
         }

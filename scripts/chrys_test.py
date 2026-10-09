@@ -42,6 +42,7 @@ _MAX_RENDERED_REASONS = 3
 _PYTEST_NO_TESTS_COLLECTED = 5
 _PYTEST_FILE_PATTERNS = ("test_*.py", "*_test.py")
 _MAX_SOURCE_IMPORT_HOPS = 2
+_BELOW_NORMAL_NICENESS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,8 +127,9 @@ ARCHITECTURE_RULES = (
         "tests/architecture/test_hygiene_i18n_messages.py",
         ("src/chrys/app/tui/**", "src/chrys/foundation/i18n/**"),
     ),
+    TestRule("tests/architecture/test_hygiene_lazy_imports.py", ("src/chrys/**",)),
     TestRule("tests/architecture/test_hygiene_llm_client_owners.py", ("src/chrys/**",)),
-    TestRule("tests/architecture/test_hygiene_optional_imports.py", ("src/chrys/**",)),
+    TestRule("tests/architecture/test_hygiene_pillow_formats.py", ("src/chrys/**",)),
     TestRule("tests/architecture/test_hygiene_reminder_sources.py", ("src/chrys/**",)),
     TestRule("tests/architecture/test_hygiene_session_surface.py"),
     TestRule("tests/architecture/test_hygiene_source_asserts.py"),
@@ -138,6 +140,10 @@ ARCHITECTURE_RULES = (
     TestRule("tests/architecture/test_hygiene_tui_prose.py", ("src/chrys/app/tui/**",)),
     TestRule("tests/architecture/test_layering.py", ("src/chrys/**",)),
     TestRule("tests/architecture/test_network_egress.py"),
+    TestRule(
+        "tests/architecture/test_python_pin.py",
+        (".python-version", ".github/workflows/**", "scripts/build.sh", "scripts/build.ps1"),
+    ),
     TestRule("tests/architecture/test_quarantine.py"),
     TestRule("tests/architecture/test_test_file_size.py", ("tests/**",)),
     TestRule("tests/architecture/test_test_hygiene.py"),
@@ -167,15 +173,21 @@ ARCHITECTURE_RULES = (
 _WORKFLOW_WORKER_HOST = ("src/chrys/service/workflows/worker_host.py", "src/chrys/service/workflows/sdk/**")
 _WORKFLOW_FAKE_WORKER = ("tests/orchestration/workflows/fake_worker.py",)
 
-# The reminder characterization tests pin the whole reminder pipeline, whose
-# sources sit more than two imports away; the golden test reads its baseline
-# files by path.
+# The reminder lifecycle tests drive the whole reminder pipeline, whose
+# sources sit more than two imports away.
 _REMINDER_PIPELINE = (
     "src/chrys/service/agent_middleware/system_reminder.py",
     "src/chrys/service/agent_middleware/reminders/**",
     "src/chrys/service/context/compaction/last_words_state.py",
 )
-_REMINDER_GOLDENS = ("tests/service/agent_middleware/reminder_goldens/**",)
+
+# The client contracts build every LLM client through ``create_client``, most
+# of it more than two imports from the test, and import the package in a
+# subprocess.
+_LLM_CLIENT_SOURCES = (
+    "src/chrys/service/llm/**",
+    "src/chrys/service/profiles/models/**",
+)
 
 # Regular tests can also consume repository files without importing them.  Keep
 # those dependency edges explicit: subprocess fixtures, filesystem scanners,
@@ -193,8 +205,20 @@ REGULAR_RULES = (
     TestRule("tests/orchestration/workflows/test_worker_semantics.py", _WORKFLOW_WORKER_HOST),
     TestRule("tests/orchestration/workflows/test_worker_stdout.py", _WORKFLOW_WORKER_HOST),
     TestRule("tests/orchestration/workflows/test_worker_values.py", _WORKFLOW_WORKER_HOST),
-    TestRule("tests/service/agent_middleware/test_reminder_goldens.py", (*_REMINDER_PIPELINE, *_REMINDER_GOLDENS)),
+    # Previews, runs and the CLI start a real worker without importing the host;
+    # many TUI tests only reach it through a shared helper, so they go by directory.
+    TestRule("tests/orchestration/workflows", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/app/cli/test_workflow.py", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/app/cli/test_workflow_validate.py", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/app/tui/screens/main", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/app/tui/screens/test_workflow_confirm_dialog.py", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/app/tui/widgets/test_workflow_transcript_order.py", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/support/test_workflow_previews.py", _WORKFLOW_WORKER_HOST),
+    TestRule("tests/service/workflows/test_py39_harness.py", _WORKFLOW_WORKER_HOST),
     TestRule("tests/service/agent_middleware/test_reminder_lifecycle.py", _REMINDER_PIPELINE),
+    TestRule("tests/service/llm/test_client_contracts.py", _LLM_CLIENT_SOURCES),
+    TestRule("tests/service/llm/test_persisted_names.py", ("src/chrys/service/llm/**",)),
+    TestRule("tests/app/features/buddy", ("src/chrys/app/features/buddy/sprites/*.toml",)),
     TestRule("tests/app/tui/behaviors/test_chrys_themes.py", ("src/chrys/app/tui/**",)),
     TestRule("tests/app/tui/i18n/test_bindings.py", ("src/chrys/app/tui/**",)),
     TestRule("tests/app/tui/screens/test_modal_insert_clipboard.py", ("src/chrys/app/tui/screens/**",)),
@@ -228,10 +252,24 @@ _FULL_TRIGGER_PATHS = frozenset(
 
 _BUILTIN_PROFILE_TEST_TARGETS = (
     "tests/app/acp/test_session_manager_profiles.py",
+    "tests/app/cli/test_workflow_validate.py",
     "tests/app/tui/behaviors/test_chrys_themes.py",
     "tests/app/tui/screens",
     "tests/orchestration/engine/build",
     "tests/service/profiles",
+)
+
+# Built-in workflow templates are loaded by path through discovery, never imported.
+_BUILTIN_WORKFLOW_TEST_TARGETS = (
+    "tests/app/cli/test_app.py",
+    "tests/app/cli/test_workflow.py",
+    "tests/app/tui/screens/main",
+    "tests/app/tui/screens/test_workflow_confirm_dialog.py",
+    "tests/app/tui/widgets/markdown/diagram/test_workflow_graph.py",
+    "tests/app/tui/widgets/test_trajectory_workflow.py",
+    "tests/orchestration/workflows",
+    "tests/service/workflows",
+    "tests/support/test_workflow_previews.py",
 )
 
 _TRAJECTORY_SOURCE_PREFIXES = (
@@ -388,6 +426,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --smart, analyze only the files changed by the current task",
     )
     return parser
+
+
+def _lower_priority() -> None:
+    """Run this process, and every child it starts, below normal CPU priority.
+
+    Tests still use every idle core, but whatever else the user runs comes
+    first, so there is no opt-out. Children inherit the priority: the pytest
+    workers and the processes tests start run lower too. A process already
+    running lower keeps its priority.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetPriorityClass.argtypes = (wintypes.HANDLE,)
+        kernel32.GetPriorityClass.restype = wintypes.DWORD
+        kernel32.SetPriorityClass.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.SetPriorityClass.restype = wintypes.BOOL
+        process = kernel32.GetCurrentProcess()
+        current = kernel32.GetPriorityClass(process)
+        if current in (subprocess.IDLE_PRIORITY_CLASS, subprocess.BELOW_NORMAL_PRIORITY_CLASS):
+            lowered = True
+        else:
+            # A failed query (0) leaves the priority alone rather than risk raising it.
+            lowered = current != 0 and bool(kernel32.SetPriorityClass(process, subprocess.BELOW_NORMAL_PRIORITY_CLASS))
+    else:
+        try:
+            if os.getpriority(os.PRIO_PROCESS, 0) < _BELOW_NORMAL_NICENESS:
+                os.setpriority(os.PRIO_PROCESS, 0, _BELOW_NORMAL_NICENESS)
+            lowered = True
+        except OSError:
+            lowered = False
+    if not lowered:
+        _write("Could not lower the CPU priority; tests run at normal priority.")
 
 
 def _run_process(args: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[bytes]:
@@ -1503,11 +1577,11 @@ def _add_trajectory_targets(selection: Selection, changes: tuple[Change, ...]) -
     )
     test_file = "tests/architecture/test_trajectory_wait_inventory.py"
     if inventory_changed:
-        selection.add(test_file, "trajectory inventory implementation or signed manifest changed")
+        selection.add(test_file, "trajectory wait inventory or manifest changed")
         return
     if inventory_source_changed:
         for test_name in (
-            "test_signed_wait_manifest_covers_every_ast_node",
+            "test_wait_manifest_matches_source",
             "test_wait_inventory_covers_every_explicit_and_implicit_async_wait",
         ):
             selection.add(f"{test_file}::{test_name}", "async-capable production source changed")
@@ -1521,15 +1595,23 @@ def _add_trajectory_targets(selection: Selection, changes: tuple[Change, ...]) -
 def _add_runtime_asset_targets(selection: Selection, changes: tuple[Change, ...], *, root: Path) -> None:
     for change in changes:
         path = change.path
-        if path in {".github/workflows/ci.yml", ".github/workflows/cd.yml"} or any(
-            _matches(path, pattern) for pattern in ("scripts/build*.sh", "scripts/build*.ps1")
-        ):
+        if path in {
+            ".github/workflows/ci.yml",
+            ".github/workflows/cd.yml",
+            ".github/workflows/tag-release.yml",
+            "scripts/check_wheel.py",
+            "scripts/offline_wheel_overrides.txt",
+            "scripts/offline_build_constraints.txt",
+        } or any(_matches(path, pattern) for pattern in ("scripts/build*.sh", "scripts/build*.ps1")):
             selection.add("tests/app/cli/test_app.py", f"build contract file changed: {path}")
         elif path.endswith(".tcss"):
             selection.add("tests/app/tui", f"Textual stylesheet changed: {path}")
         elif path.startswith("src/chrys/service/profiles/agents/builtins/") and path.endswith(".yaml"):
             for target in _BUILTIN_PROFILE_TEST_TARGETS:
                 selection.add(target, f"built-in profile changed: {path}")
+        elif path.startswith("src/chrys/service/workflows/builtins/"):
+            for target in _BUILTIN_WORKFLOW_TEST_TARGETS:
+                selection.add(target, f"built-in workflow changed: {path}")
         elif path.startswith("locales/") or path.endswith("/LC_MESSAGES/chrys.mo"):
             selection.add("tests/foundation/i18n", f"i18n artifact changed: {path}")
             selection.add("tests/app/tui/i18n", f"i18n artifact changed: {path}")
@@ -1846,6 +1928,7 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     if options.paths and options.full:
         parser.error("--paths can only be used with --smart")
+    _lower_priority()
     if options.full:
         return _run_full()
     try:

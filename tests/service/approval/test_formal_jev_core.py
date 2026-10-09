@@ -316,7 +316,7 @@ async def test_unavailable_sdk_transport_does_not_block_judging(monkeypatch, for
 
     class ClientWithoutTransport:
         def __init__(self):
-            self.client = object() if transport == "missing" else type("SDK", (), {"_client": object()})()
+            self.sdk_client = object() if transport == "missing" else type("SDK", (), {"_client": object()})()
             self.closed = False
 
         async def aclose(self):
@@ -345,7 +345,7 @@ async def test_unavailable_sdk_transport_does_not_block_judging(monkeypatch, for
 async def test_openai_sdk_transport_contract(monkeypatch):
     async with _judge(monkeypatch, []) as (judge, _):
         client = await judge._get_client()
-        transport = getattr(client.client, "_client", None)
+        transport = getattr(client.sdk_client, "_client", None)
         assert isinstance(transport, httpx.AsyncClient), "Revisit transport auditing after an OpenAI SDK change"
         assert transport.event_hooks["request"].count(judge_module._count_transport_request) == 1
 
@@ -672,7 +672,7 @@ async def test_cancelled_close_drains_both_clients_once(monkeypatch):
                 await task
             await judge.aclose()
             assert close_spy.await_count == 1
-            assert reasoning_client.client.is_closed()
+            assert reasoning_client.sdk_client.is_closed()
             for stage_judge in (judge, judge._reasoning_judge):
                 with pytest.raises(RuntimeError, match="closed"):
                     await stage_judge._get_client()

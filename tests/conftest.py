@@ -149,18 +149,13 @@ _textual_node_diet.apply_runtime_patch()
 
 
 @pytest.fixture(autouse=True)
-def notification_driver(monkeypatch: pytest.MonkeyPatch) -> RecordingNotificationDriver | None:
+def notification_driver(monkeypatch: pytest.MonkeyPatch) -> RecordingNotificationDriver:
     """Keep notification policy live, but never deliver to the developer's desktop.
 
     Native-driver tests still exercise their own explicitly mocked OS commands.
     Acknowledging sound delivery also prevents NotificationService's bell fallback.
     """
-    try:
-        from chrys.app.tui.notifications import service
-    except ModuleNotFoundError as exc:
-        if exc.name == "textual" or (exc.name is not None and exc.name.startswith("textual.")):
-            return None
-        raise
+    from chrys.app.tui.notifications import service
     from tests.support.notifications import RecordingNotificationDriver
 
     driver = RecordingNotificationDriver()
@@ -171,11 +166,7 @@ def notification_driver(monkeypatch: pytest.MonkeyPatch) -> RecordingNotificatio
 @pytest.fixture(autouse=True)
 def _isolated_textual_dispatch_plans() -> Iterator[None]:
     """Keep cached handler references inside the test that acquired them."""
-    try:
-        from textual.message_pump import MessagePump
-    except ImportError:
-        yield
-        return
+    from textual.message_pump import MessagePump
 
     initial_cache = getattr(MessagePump._get_dispatch_methods, "_plan_cache", None)
     if initial_cache is not None:
@@ -198,12 +189,6 @@ def _settled_pilot_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     See ``tests/support/pilot_barrier.py``: Textual's own wait covers only the messages
     queued when it starts, and a starved runner's idle probe does not cover the rest.
     """
-    try:
-        import textual.pilot  # noqa: F401
-    except ModuleNotFoundError as exc:
-        if exc.name == "textual" or (exc.name is not None and exc.name.startswith("textual.")):
-            return
-        raise
     from tests.support.pilot_barrier import install_settled_wait_for_screen
 
     install_settled_wait_for_screen(monkeypatch)
@@ -381,10 +366,10 @@ def _disable_prompt_history(monkeypatch: pytest.MonkeyPatch) -> None:
     """Block tests from writing to the real ``~/.chrys/prompt_history.jsonl``.
 
     TUI integration tests that drive a full ``ChrysApp`` through ``pilot``
-    will reach ``append_history`` via ``_send_user_message``; without this
-    guard they would persist test prompts into the developer's real history
-    file. Tests that exercise the history layer itself opt back in by
-    deleting the env var inside their own fixture (see
+    will reach ``append_history`` when the input bar records a submitted
+    prompt; without this guard they would persist test prompts into the
+    developer's real history file. Tests that exercise the history layer
+    itself opt back in by deleting the env var inside their own fixture (see
     ``tests/app/tui/support/test_prompt_history.py::history_dir``).
     """
     monkeypatch.setenv("CHRYS_HISTORY_DISABLE", "1")

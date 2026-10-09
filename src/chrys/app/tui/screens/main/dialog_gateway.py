@@ -20,6 +20,7 @@ from chrys.app.tui.screens.main.dialog_controllers import (
 from chrys.app.tui.screens.main.ports import DialogGatewayView, StatusMessage
 from chrys.app.tui.widgets import PromptDraft
 from chrys.foundation.events.types import ApprovalRequest, ApprovalReviewed, QuestionToUser
+from chrys.foundation.models.approval_reuse import ReuseChoice
 from chrys.foundation.models.ask_user import AskUserAnswer
 
 
@@ -28,10 +29,13 @@ class UiGatewayCallbacks:
     """Non-UI dialog effects supplied by the screen owner."""
 
     debug: Callable[[str, str], None]
-    handle_approval_response: Callable[[str, bool, str, dict[str, Any] | None], ApprovalResponseWorker | None]
+    handle_approval_response: Callable[
+        [str, bool, str, dict[str, Any] | None, ReuseChoice], ApprovalResponseWorker | None
+    ]
     publish_auto_fulfill_blocked: Callable[[ApprovalReviewed], Awaitable[None]]
     handle_ask_user_response: Callable[[str, tuple[AskUserAnswer, ...]], object]
     question_inline_preferred: Callable[[], bool]
+    approval_defer_while_judging: Callable[[], bool]
     set_agent_loading: Callable[[bool], None]
 
 
@@ -56,23 +60,25 @@ class UiGateway:
         event: ApprovalRequest,
         approval_body: object | None,
         on_result: Callable[[tuple[bool, str, dict[str, Any] | None] | None], None],
-    ) -> ApprovalDialogHandle:
-        return self._view.show_approval_dialog(event, approval_body, on_result)
-
-    def deliver_approval_verdict(
-        self,
-        dialog: ApprovalDialogHandle,
-        event: ApprovalReviewed,
         *,
-        after_refresh: bool,
-    ) -> None:
-        self._view.deliver_approval_verdict(dialog, event, after_refresh=after_refresh)
+        verdict: ApprovalReviewed | None,
+    ) -> ApprovalDialogHandle:
+        return self._view.show_approval_dialog(event, approval_body, on_result, verdict=verdict)
+
+    def deliver_approval_verdict(self, dialog: ApprovalDialogHandle, event: ApprovalReviewed) -> None:
+        self._view.deliver_approval_verdict(dialog, event)
 
     def dismiss_approval_dialog(self, dialog: ApprovalDialogHandle) -> None:
         self._view.dismiss_approval_dialog(dialog)
 
     def approval_dialog_tool_name(self, dialog: ApprovalDialogHandle) -> str:
         return self._view.approval_dialog_tool_name(dialog)
+
+    def approval_defer_while_judging(self) -> bool:
+        return self._callbacks.approval_defer_while_judging()
+
+    def set_auto_review_count(self, count: int) -> None:
+        self._view.set_auto_review_count(count)
 
     def notify_approval_required(self) -> None:
         self._view.notify_approval_required()
@@ -86,8 +92,9 @@ class UiGateway:
         approved: bool,
         reason: str,
         modified_args: dict[str, Any] | None = None,
+        remember_choice: ReuseChoice = "",
     ) -> ApprovalResponseWorker | None:
-        return self._callbacks.handle_approval_response(request_id, approved, reason, modified_args)
+        return self._callbacks.handle_approval_response(request_id, approved, reason, modified_args, remember_choice)
 
     def run_worker(self, awaitable: Awaitable[Any], *, group: str) -> None:
         self._view.run_worker(awaitable, group=group)

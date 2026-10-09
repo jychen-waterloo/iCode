@@ -40,9 +40,9 @@ jobs:
           enable-cache: true
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: "3.14"
+          python-version-file: .python-version
           allow-prereleases: true
-      - run: uv sync --extra all
+      - run: uv sync
       # Calibration must run serially and alone: concurrent suites contend for
       # CPU and skew the frozen_collect_ratio / latency gates.
       - name: Run gc_calibration test probes

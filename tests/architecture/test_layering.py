@@ -48,7 +48,7 @@ TIER_ORDER = {
     APP: 4,
 }
 
-ROOT_METADATA_EXPORTS = {"__version__"}
+ROOT_METADATA_EXPORTS = {"__version__", "DISTRIBUTION_NAME"}
 
 _KERNEL_PRIVATE_PROMOTION_REASON = (
     "preview shaping / provider-specific key shared with service tier; promote to a public kernel module"
@@ -63,11 +63,15 @@ _KERNEL_PRIVATE_IMPORT_ALLOWLIST = {
         "chrys.kernel._result_ceiling",
     ): _KERNEL_PRIVATE_PROMOTION_REASON,
     (
-        Path("src/chrys/service/llm/openai_chat_completion.py"),
+        Path("src/chrys/service/llm/chat_completions/reasoning.py"),
         "chrys.kernel._content",
     ): _KERNEL_PRIVATE_PROMOTION_REASON,
     (
-        Path("src/chrys/service/llm/anthropic_chat.py"),
+        Path("src/chrys/service/llm/anthropic_messages/history.py"),
+        "chrys.kernel._content",
+    ): _KERNEL_PRIVATE_PROMOTION_REASON,
+    (
+        Path("src/chrys/service/llm/anthropic_messages/decode.py"),
         "chrys.kernel._content",
     ): _KERNEL_PRIVATE_PROMOTION_REASON,
     (

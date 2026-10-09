@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from chrys.foundation.text.model_json import model_json
 from chrys.foundation.util.once_close import OnceClose
 from chrys.kernel import ChatResponse, Message
 from chrys.service.approval.jev import JevPredicateClient, is_jev_profile
@@ -29,7 +30,7 @@ from chrys.service.approval.predicate import (
     evaluate_predicate_response,
     load_default_asset,
 )
-from chrys.service.llm.responses import get_final_response
+from chrys.service.llm.one_shot import get_final_response
 
 if TYPE_CHECKING:
     from chrys.service.profiles.models.schema import ModelProfile
@@ -193,7 +194,7 @@ def _build_user_prompt(
     """Build the user-turn prompt for the judge LLM call."""
     workspace = ", ".join(workspace_roots) if workspace_roots else "(not specified)"
     user_ctx, latest_user_ctx = _format_user_messages(user_message, user_messages)
-    formatted_args = json.dumps(args, indent=2, default=str)
+    formatted_args = model_json(args, default=str, indent=2)
 
     return (
         f"{_current_time_context()}\n\n"
@@ -558,7 +559,7 @@ class ApprovalJudge:
                     "glm-openai",
                 }:
                     # SDK boundary: count requests on the owned provider transport.
-                    transport = getattr(self._client.client, "_client", None)
+                    transport = getattr(self._client.sdk_client, "_client", None)
                     if isinstance(transport, httpx.AsyncClient):
                         if _count_transport_request not in transport.event_hooks["request"]:
                             transport.event_hooks["request"].append(_count_transport_request)
@@ -721,7 +722,7 @@ class ApprovalJudge:
         """Retry invalid predicate JSON with the same conversation repair flow as Direct."""
         client = await self._get_client()
         if is_jev_profile(self._profile):
-            client = JevPredicateClient(client.client, self._profile.model_id, asset)
+            client = JevPredicateClient(client.sdk_client, self._profile.model_id, asset)
         user_prompt = _build_user_prompt(user_message, tool_name, tool_kind, args, workspace_roots, user_messages)
         messages: list[Message] = [
             Message("system", [_build_predicate_system_prompt(asset)]),

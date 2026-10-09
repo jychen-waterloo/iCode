@@ -37,6 +37,7 @@ from chrys.foundation.events.types import (
 )
 from chrys.foundation.i18n import Localizer, MessageRef
 from chrys.foundation.i18n.formatting import format_message
+from chrys.foundation.models.approval_reuse import ReuseChoice
 from chrys.foundation.models.ask_user import AskUserAnswer, AskUserOption, AskUserQuestion
 
 
@@ -89,13 +90,17 @@ class _ApprovalPort:
         self.debug_calls: list[tuple[str, str]] = []
         self.notifications = 0
         self.responses: list[tuple[str, bool, str, dict[str, Any] | None]] = []
+        self.remember_choices: list[ReuseChoice] = []
         self.updated_args: list[tuple[str, dict[str, Any]]] = []
         self.auto_fulfill_blocked: list[str] = []
         self.cancelled_dialogs: list[str] = []
         self.bypass: ApprovalBypassDecision | None = None
+        self.defer_while_judging = False
+        self.review_counts: list[int] = []
+        self.body: object | None = None
 
     async def build_approval_body(self, _event: ApprovalRequest) -> object | None:
-        return object() if self.bypass is not None else None
+        return object() if self.bypass is not None else self.body
 
     def approval_body_bypass(self, _body: object | None) -> ApprovalBypassDecision | None:
         return self.bypass
@@ -103,17 +108,21 @@ class _ApprovalPort:
     def show_approval_dialog(
         self,
         event: ApprovalRequest,
-        _approval_body: object | None,
+        approval_body: object | None,
         on_result: Callable[[tuple[bool, str, dict[str, Any] | None] | None], None],
+        *,
+        verdict: ApprovalReviewed | None,
     ) -> SimpleNamespace:
         dialog = SimpleNamespace(
             request_id=event.request_id,
-            _tool_name=event.tool_name,
+            tool_name=event.tool_name,
             user_decision_submitted=False,
+            remember_choice="",
             is_dismissed=False,
             callback=on_result,
+            body=approval_body,
+            opened_with=None if verdict is None else (verdict.approved, verdict.reason),
             verdicts=[],
-            deferred_verdicts=[],
         )
         self.dialogs.append(dialog)
         return dialog
@@ -123,18 +132,11 @@ class _ApprovalPort:
         self.cancelled_dialogs.append(dialog.request_id)
         dialog.callback(None)
 
-    def deliver_approval_verdict(
-        self,
-        dialog: SimpleNamespace,
-        event: ApprovalReviewed,
-        *,
-        after_refresh: bool,
-    ) -> None:
-        target = dialog.deferred_verdicts if after_refresh else dialog.verdicts
-        target.append((event.approved, event.reason))
+    def deliver_approval_verdict(self, dialog: SimpleNamespace, event: ApprovalReviewed) -> None:
+        dialog.verdicts.append((event.approved, event.reason))
 
     def approval_dialog_tool_name(self, dialog: SimpleNamespace) -> str:
-        return dialog._tool_name
+        return dialog.tool_name
 
     def debug(self, key: str, message: str = "") -> None:
         self.debug_calls.append((key, message))
@@ -151,14 +153,22 @@ class _ApprovalPort:
         approved: bool,
         reason: str,
         modified_args: dict[str, Any] | None = None,
+        remember_choice: ReuseChoice = "",
     ) -> None:
         self.responses.append((request_id, approved, reason, modified_args))
+        self.remember_choices.append(remember_choice)
 
     def run_worker(self, _awaitable: object, *, group: str) -> None:
         assert group == "approval-cleanup"
 
     async def publish_auto_fulfill_blocked(self, event: ApprovalReviewed) -> None:
         self.auto_fulfill_blocked.append(event.request_id)
+
+    def approval_defer_while_judging(self) -> bool:
+        return self.defer_while_judging
+
+    def set_auto_review_count(self, count: int) -> None:
+        self.review_counts.append(count)
 
 
 def test_approval_controller_skips_cached_auto_approved_request_and_shows_flagged() -> None:
@@ -176,9 +186,22 @@ def test_approval_controller_skips_cached_auto_approved_request_and_shows_flagge
     port.dialogs[0].callback((True, "", None))
 
     assert [dialog.request_id for dialog in port.dialogs] == ["req-1", "req-3"]
-    assert port.dialogs[1].deferred_verdicts == [(False, "danger")]
+    assert port.dialogs[1].opened_with == (False, "danger")
+    assert port.dialogs[1].verdicts == []
     assert controller.pending_verdicts == {}
     assert controller.dialog_open is True
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_approval_controller_forwards_the_dialog_remember_choice_only_with_approval(approved: bool) -> None:
+    port = _ApprovalPort()
+    controller = ApprovalQueueController(port)
+    asyncio.run(controller.on_request(_approval_request("req-1", judging=False)))
+    port.dialogs[0].remember_choice = "EXACT_SESSION"
+
+    port.dialogs[0].callback((approved, "", None))
+
+    assert port.remember_choices == ["EXACT_SESSION" if approved else ""]
 
 
 def test_approval_controller_bypass_does_not_open_dialog() -> None:
@@ -233,6 +256,174 @@ def test_approval_controller_cancellation_wins_race_with_auto_verdict() -> None:
     assert port.responses == []
     assert controller.pending_verdicts == {}
     assert controller.dialog_open is False
+
+
+# ──── ui.approval.defer_while_judging: nothing shows while the judge reviews ────
+
+
+def _deferring_controller() -> tuple[_ApprovalPort, ApprovalQueueController]:
+    port = _ApprovalPort()
+    port.defer_while_judging = True
+    return port, ApprovalQueueController(port)
+
+
+def test_a_judging_request_waits_out_of_sight_and_is_counted() -> None:
+    port, controller = _deferring_controller()
+
+    asyncio.run(controller.on_request(_approval_request("req-1")))
+
+    assert port.dialogs == []
+    assert port.notifications == 0
+    assert list(controller.deferred) == ["req-1"]
+    assert list(controller.queue) == []
+    assert controller.dialog_open is False
+    assert port.review_counts == [1]
+
+
+def test_a_request_the_judge_approves_is_never_shown() -> None:
+    port, controller = _deferring_controller()
+    port.body = object()
+    asyncio.run(controller.on_request(_approval_request("req-1")))
+
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="req-1", approved=True, reason="safe")))
+
+    assert port.dialogs == []
+    assert port.notifications == 0
+    # The judge's own auto-fulfilment answers the backend; the TUI adds nothing.
+    assert port.responses == []
+    assert port.auto_fulfill_blocked == []
+    assert controller.deferred == {}
+    assert controller.bodies == {}
+    assert controller.pending_verdicts == {}
+    assert port.review_counts == [1, 0]
+
+
+def test_a_request_the_judge_flags_opens_flagged_and_notifies_once() -> None:
+    port, controller = _deferring_controller()
+    port.body = body = object()
+    asyncio.run(controller.on_request(_approval_request("req-1")))
+
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="req-1", approved=False, reason="danger")))
+
+    (dialog,) = port.dialogs
+    assert (dialog.request_id, dialog.body, dialog.opened_with) == ("req-1", body, (False, "danger"))
+    assert dialog.verdicts == []
+    assert port.notifications == 1
+    assert controller.deferred == {}
+    assert controller.pending_verdicts == {}
+    assert controller.dialog_open is True
+    assert port.review_counts == [1, 0]
+
+    dialog.callback((True, "", None))
+
+    assert port.responses == [("req-1", True, "", None)]
+    assert controller.dialog_open is False
+
+
+def test_with_the_setting_off_a_judging_request_shows_at_once() -> None:
+    port = _ApprovalPort()
+    controller = ApprovalQueueController(port)
+
+    asyncio.run(controller.on_request(_approval_request("req-1")))
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="req-1", approved=False, reason="danger")))
+
+    (dialog,) = port.dialogs
+    assert dialog.opened_with is None
+    assert dialog.verdicts == [(False, "danger")]
+    assert port.notifications == 1
+    assert controller.deferred == {}
+    assert port.review_counts == []
+
+
+def test_a_request_nobody_judges_shows_at_once_with_the_setting_on() -> None:
+    port, controller = _deferring_controller()
+
+    asyncio.run(controller.on_request(_approval_request("req-1", judging=False)))
+
+    assert [dialog.request_id for dialog in port.dialogs] == ["req-1"]
+    assert port.notifications == 1
+    assert controller.deferred == {}
+    assert port.review_counts == []
+
+
+def test_the_setting_is_read_once_per_request() -> None:
+    """Turning the setting off leaves requests already out of sight there until their verdict."""
+    port, controller = _deferring_controller()
+    asyncio.run(controller.on_request(_approval_request("before")))
+    port.defer_while_judging = False
+
+    asyncio.run(controller.on_request(_approval_request("after")))
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="before", approved=True, reason="safe")))
+
+    assert [dialog.request_id for dialog in port.dialogs] == ["after"]
+    assert controller.deferred == {}
+    assert port.review_counts == [1, 0]
+
+
+def test_cancelling_a_request_out_of_sight_drops_it_and_its_late_verdict() -> None:
+    port, controller = _deferring_controller()
+    port.body = object()
+    asyncio.run(controller.on_request(_approval_request("req-1")))
+
+    asyncio.run(controller.on_cancelled(ApprovalCancelled(request_id="req-1")))
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="req-1", approved=False, reason="late")))
+
+    assert port.dialogs == []
+    assert port.responses == []
+    assert port.cancelled_dialogs == []
+    assert controller.deferred == {}
+    assert controller.bodies == {}
+    assert controller.pending_verdicts == {}
+    assert list(controller.queue) == []
+    assert port.review_counts == [1, 0]
+
+
+def test_flags_open_in_verdict_order_one_dialog_at_a_time() -> None:
+    port, controller = _deferring_controller()
+    asyncio.run(controller.on_request(_approval_request("first", tool_name="rm")))
+    asyncio.run(controller.on_request(_approval_request("second", tool_name="mv")))
+
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="second", approved=False, reason="b")))
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="first", approved=False, reason="a")))
+
+    assert [(dialog.request_id, dialog.opened_with) for dialog in port.dialogs] == [("second", (False, "b"))]
+    assert port.review_counts == [1, 2, 1, 0]
+
+    port.dialogs[0].callback((False, "", None))
+
+    assert [(dialog.request_id, dialog.opened_with) for dialog in port.dialogs] == [
+        ("second", (False, "b")),
+        ("first", (False, "a")),
+    ]
+    assert port.notifications == 2
+
+
+def test_a_flag_waits_behind_the_open_dialog() -> None:
+    port, controller = _deferring_controller()
+    asyncio.run(controller.on_request(_approval_request("asked", judging=False)))
+    asyncio.run(controller.on_request(_approval_request("judged")))
+
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="judged", approved=False, reason="danger")))
+
+    assert [dialog.request_id for dialog in port.dialogs] == ["asked"]
+
+    port.dialogs[0].callback((True, "", None))
+
+    assert [(dialog.request_id, dialog.opened_with) for dialog in port.dialogs] == [
+        ("asked", None),
+        ("judged", (False, "danger")),
+    ]
+
+
+def test_a_verdict_for_an_unknown_request_changes_nothing() -> None:
+    port, controller = _deferring_controller()
+    asyncio.run(controller.on_request(_approval_request("req-1")))
+
+    asyncio.run(controller.on_reviewed(ApprovalReviewed(request_id="other", approved=False, reason="danger")))
+
+    assert port.dialogs == []
+    assert list(controller.deferred) == ["req-1"]
+    assert port.review_counts == [1]
 
 
 class _QuestionPort:

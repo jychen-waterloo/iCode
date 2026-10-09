@@ -77,6 +77,7 @@ from chrys.service.agent_middleware import (
 from chrys.service.agent_middleware.injection import InjectionMiddleware
 from chrys.service.agent_middleware.system_reminder import SystemReminderMiddleware
 from chrys.service.approval.policy import ApprovalMode, ApprovalPolicy
+from chrys.service.approval.reuse_binding import ApprovalReuseBinding
 from chrys.service.context.compaction.last_words_state import DropRoundBreakerState, LastWordsState
 from chrys.service.context.compaction.spill import COMPACTIONS_DIR_NAME
 from chrys.service.context.memory_loader import load_memory_content, memory_truncated_warning
@@ -684,6 +685,7 @@ async def build_agent(
         mcp_tools_by_server: dict[str, list[str]] = {}
         if profile.tools.mcp:
             from chrys.service.mcp.adapter import MCPAdapter
+            from chrys.service.mcp.thinking_warning import warn_if_tool_loading_unbinds_thinking
 
             reserved_tool_names = chrys_reserved_tool_names()
             reserved_tool_names.update(tool.name for tool in tools)
@@ -733,6 +735,7 @@ async def build_agent(
             mcp_tools = await mcp_adapter.connect_all(profile.tools.mcp, progress=_mcp_progress)
             mcp_tools_by_server = mcp_adapter.tool_names_by_server
             tools.extend(mcp_tools)
+            warn_if_tool_loading_unbinds_thinking(profile, active_profile, chat_options, mcp_tools_by_server)
 
         # Build skills provider (if configured)
         await _progress(AGENT_LOAD_PHASE_SKILLS, "Loading skills", status=AGENT_LOAD_STATUS_RUNNING)
@@ -743,6 +746,7 @@ async def build_agent(
             profile.skills,
             runtime=runtime,
             session_dir=effective_session_dir,
+            project_skills_enabled=settings.project_skills_enabled,
         )
         if skills_provider is not None:
             context_providers.append(skills_provider)
@@ -957,6 +961,9 @@ async def build_agent(
         approval_middleware = await create_approval(
             conversation,
             ApprovalInputs(
+                reuse=ApprovalReuseBinding(runtime, tools, session_id=session_id)
+                if session_id or runtime.session_id
+                else None,
                 approval_policy=approval_policy,
                 event_bus=bus,
                 session_id=session_id,

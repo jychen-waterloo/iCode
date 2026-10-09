@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from chrys.foundation.platform import windows_program_files_dirs
+from chrys.foundation.platform.output_capture import BoundedCapture, CapturedOutput, drain_process_pipes
 from chrys.foundation.platform.process import (
+    MissingWorkingDirectoryError,
     SubprocessStoppedError,
-    decode_subprocess_output,
     managed_subprocess,
     wait_for_subprocess,
 )
@@ -30,10 +31,12 @@ from chrys.foundation.platform.runtime_paths import (
     which_excluding_runtime,
 )
 from chrys.foundation.platform.win_console import preserve_console_mode
-from chrys.foundation.text.tool_output import process_carriage_returns, strip_ansi, truncate_output
+from chrys.foundation.text.tool_output import process_carriage_returns, strip_ansi
+from chrys.foundation.tool_result_metadata import PARTIAL_OUTPUT_LABEL
 from chrys.service.skills.constants import DEFAULT_SCRIPT_RESULT_MAX_TOKENS
 from chrys.service.tools.result_metadata import record_process_result, record_process_timeout, tool_error
-from chrys.service.tools.spill import truncate_with_spill
+from chrys.service.tools.spill import bound_process_output
+from chrys.service.tools.workspace_paths import working_dir_missing_error
 
 if TYPE_CHECKING:
     from chrys.foundation.models.session_env import SessionEnvironment
@@ -165,6 +168,22 @@ def _args_to_flags(args: dict[str, Any]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _clean_output(text: str) -> str:
+    return process_carriage_returns(strip_ansi(text))
+
+
+def _script_output(stdout: CapturedOutput, stderr: CapturedOutput, *, returncode: int | None = None) -> str:
+    """Assemble a script's captured output and a nonzero exit code into one text."""
+    parts: list[str] = []
+    if stdout.seen:
+        parts.append(stdout.text(_clean_output))
+    if stderr.seen:
+        parts.append(f"[stderr]\n{stderr.text(_clean_output)}")
+    if returncode:
+        parts.append(f"[exit_code: {returncode}]")
+    return "\n".join(parts).strip()
+
+
 class SubprocessScriptRunner:
     """Async skill script runner using subprocess execution.
 
@@ -241,6 +260,11 @@ class SubprocessScriptRunner:
                 details={"skill_name": skill.name, "script_name": script.name, "script_path": script.full_path},
             )
 
+        # A project skill can live inside the deleted working directory: report
+        # the directory, not its script, so the model stops instead of retrying.
+        if cwd is None and self._runtime is not None and self._runtime.cwd and not os.path.isdir(self._runtime.cwd):
+            return working_dir_missing_error(self._runtime.cwd)
+
         if not script_path.is_file():
             return tool_error(
                 "script_file_not_found",
@@ -274,6 +298,9 @@ class SubprocessScriptRunner:
         env["PYTHONIOENCODING"] = "utf-8"
         reorder_path_demoting_runtime(env)
 
+        budget = max(100, DEFAULT_SCRIPT_RESULT_MAX_TOKENS if max_tokens is None else max_tokens)
+        stdout_capture = BoundedCapture()
+        stderr_capture = BoundedCapture()
         try:
             # Skill scripts may invoke a TUI. ``preserve_console_mode`` guards
             # the outer chrys's Windows console mode against child mutation;
@@ -289,37 +316,32 @@ class SubprocessScriptRunner:
                     env=env,
                 ) as proc:
                     process_group_id = getattr(proc, "pid", None) if sys.platform != "win32" else None
-                    stdout, stderr = await wait_for_subprocess(
-                        proc.communicate(),
+                    await wait_for_subprocess(
+                        drain_process_pipes(proc, stdout_capture, stderr_capture),
                         timeout=self._timeout,
                         process_group_id=process_group_id,
                     )
 
-                parts: list[str] = []
-                if stdout:
-                    parts.append(process_carriage_returns(strip_ansi(decode_subprocess_output(stdout))))
-                if stderr:
-                    stderr_text = process_carriage_returns(strip_ansi(decode_subprocess_output(stderr)))
-                    parts.append(f"[stderr]\n{stderr_text}")
-                if proc.returncode and proc.returncode != 0:
-                    parts.append(f"[exit_code: {proc.returncode}]")
-
+                captures = (stdout_capture.snapshot(), stderr_capture.snapshot())
                 record_process_result(proc.returncode or 0)
-                canonical = "\n".join(parts).strip() or "(no output)"
-                requested = DEFAULT_SCRIPT_RESULT_MAX_TOKENS if max_tokens is None else max_tokens
-                budget = max(100, requested)
-                plain = truncate_output(canonical, budget)
-                if plain == canonical:
-                    return canonical
-                return await truncate_with_spill(self._session_dir, "skill", canonical, budget)
+                canonical = _script_output(*captures, returncode=proc.returncode) or "(no output)"
+                return await bound_process_output(self._session_dir, "skill", canonical, budget, captures)
 
         except TimeoutError:
             record_process_timeout(self._timeout)
-            return tool_error(
+            error = tool_error(
                 "script_timeout",
                 f"Script '{script.name}' timed out after {self._timeout}s.",
                 retryable=True,
                 details={"skill_name": skill.name, "script_name": script.name, "timeout_seconds": self._timeout},
+            )
+            captures = (stdout_capture.snapshot(), stderr_capture.snapshot())
+            partial = _script_output(*captures)
+            if not partial:
+                return error
+            # The output stays out of the failure record.
+            return await bound_process_output(
+                self._session_dir, "skill", partial, budget, captures, lead=f"{error}\n{PARTIAL_OUTPUT_LABEL}\n"
             )
         except SubprocessStoppedError:
             return tool_error(
@@ -327,6 +349,10 @@ class SubprocessScriptRunner:
                 f"Script '{script.name}' entered stopped state and was terminated.",
                 details={"skill_name": skill.name, "script_name": script.name},
             )
+        except MissingWorkingDirectoryError as e:
+            if cwd is None:
+                return working_dir_missing_error(e.path)
+            return tool_error("invalid_cwd", f"'cwd' is not an existing directory: {e.path}", details={"cwd": e.path})
         except FileNotFoundError:
             return tool_error(
                 "interpreter_not_found",

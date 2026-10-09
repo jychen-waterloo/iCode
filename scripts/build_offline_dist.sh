@@ -17,7 +17,6 @@
 # Options:
 #   --output PATH    where to write the archive (default: dist/chrys-offline-dist.tar.gz)
 #   --wheel PATH     install this prebuilt chrys wheel instead of building from the checkout
-#   --extras LIST    comma-separated extras (default: tui,doc_converter,observability)
 #   --no-prune       keep pip/idlelib/tkinter and duplicate ripgrep binaries
 #
 # Environment variables:
@@ -34,8 +33,8 @@
 #                         own interpreter, so the deps are never the limiting
 #                         factor.  CD sets 2.18 on aarch64, where ripgrep has
 #                         no static musl build and its gnu binary needs 2.18.
-#                         pyproject pins pillow<12.3 to keep 2.17 reachable;
-#                         raise floor and pin together, consciously.
+#                         At the 2_17 pin, locked versions PyPI publishes no
+#                         2.17 wheel for come from offline_wheel_overrides.txt.
 #
 # The archive's layout mirrors python-build-standalone's ``install_only``
 # archives — a single top-level ``python/`` directory — so the PyApp build
@@ -47,7 +46,6 @@ DIST_URL=""
 DIST_ARCHIVE=""
 OUTPUT=""
 WHEEL=""
-EXTRAS="tui,doc_converter,observability"
 PRUNE=true
 
 while [[ $# -gt 0 ]]; do
@@ -56,11 +54,10 @@ while [[ $# -gt 0 ]]; do
         --dist-archive) DIST_ARCHIVE="$2"; shift 2 ;;
         --output)       OUTPUT="$2"; shift 2 ;;
         --wheel)        WHEEL="$2"; shift 2 ;;
-        --extras)       EXTRAS="$2"; shift 2 ;;
         --no-prune)     PRUNE=false; shift ;;
         *)
             echo "Unknown argument: $1" >&2
-            echo "Usage: $0 (--dist-url URL | --dist-archive PATH) [--output PATH] [--wheel PATH] [--extras LIST] [--no-prune]" >&2
+            echo "Usage: $0 (--dist-url URL | --dist-archive PATH) [--output PATH] [--wheel PATH] [--no-prune]" >&2
             exit 1
             ;;
     esac
@@ -138,14 +135,8 @@ echo "==> Base distribution: CPython $PY_VERSION"
 # resolution nobody reviewed.
 REQUIREMENTS="$WORK_DIR/requirements.txt"
 EXPORT_ARGS=(--locked --no-dev --no-emit-project --format requirements-txt)
-IFS=',' read -ra EXTRA_LIST <<< "$EXTRAS"
-for extra in "${EXTRA_LIST[@]}"; do
-    if [ -n "$extra" ]; then
-        EXPORT_ARGS+=(--extra "$extra")
-    fi
-done
 
-echo "==> Exporting locked dependencies (extras: $EXTRAS)..."
+echo "==> Exporting locked dependencies..."
 uv export "${EXPORT_ARGS[@]}" -o "$(native_path "$REQUIREMENTS")" --quiet
 DEP_COUNT=$(grep -c '^[A-Za-z0-9]' "$REQUIREMENTS" || true)
 echo "    $DEP_COUNT locked distributions"
@@ -164,6 +155,8 @@ GLIBC_FLOOR="${OFFLINE_GLIBC_FLOOR:-2.17}"
 # time: complete, deterministic pyc coverage instead of whatever the first
 # import graph happens to touch on the user's machine.
 INSTALL_ARGS=(--python "$(native_path "$PY")" --require-hashes --compile-bytecode)
+# Any sdist built below gets the build requirements this file pins by hash.
+INSTALL_ARGS+=(--build-constraints "$(native_path "$SCRIPT_DIR/offline_build_constraints.txt")")
 if [ "$ONLY_BINARY" = "1" ]; then
     # A source build on Linux would compile against this host's glibc and
     # silently raise the floor for everyone running the released binary.
@@ -184,6 +177,76 @@ if [ "$ONLY_BINARY" = "1" ]; then
             WHEEL_GLIBC="2.17"
         fi
         INSTALL_ARGS+=(--python-platform "$(uname -m)-manylinux_${WHEEL_GLIBC//./_}")
+
+        # Some locked versions publish no manylinux_2_17 wheel (Pillow from
+        # 12.3.0 on).  offline_wheel_overrides.txt names a wheel built for the
+        # floor for each; its hash replaces the requirement's PyPI hashes, so
+        # it is the only artifact the install accepts, and the ELF scan below
+        # still checks what it contains.
+        if [ "$WHEEL_GLIBC" = "2.17" ]; then
+            OVERRIDE_DIR="$WORK_DIR/override-wheels"
+            OVERRIDE_PLAN="$WORK_DIR/override-wheels.tsv"
+            mkdir -p "$OVERRIDE_DIR"
+            "$PY" - "$SCRIPT_DIR/offline_wheel_overrides.txt" "$REQUIREMENTS" \
+                "$(uname -m)" "$PY_VERSION" "$OVERRIDE_PLAN" <<'PYCODE'
+import re
+import sys
+from pathlib import Path
+
+manifest, requirements, machine, py_version, plan = sys.argv[1:]
+abi_tag = "-cp" + py_version.replace(".", "") + "-"
+
+
+def canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+overrides: dict[str, tuple[str, str, str]] = {}
+for raw in Path(manifest).read_text(encoding="utf-8").splitlines():
+    line = raw.split("#", 1)[0].strip()
+    if not line:
+        continue
+    project, version, arch, sha256, url = line.split()
+    if arch == machine:
+        overrides[canonical(project)] = (version, sha256, url)
+
+lines = Path(requirements).read_text(encoding="utf-8").splitlines()
+rewritten: list[str] = []
+rows: list[str] = []
+index = 0
+while index < len(lines):
+    line = lines[index]
+    index += 1
+    match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)", line)
+    if match is None or canonical(match.group(1)) not in overrides:
+        rewritten.append(line)
+        continue
+    version, sha256, url = overrides[canonical(match.group(1))]
+    if match.group(2) != version:
+        sys.exit(
+            f"uv.lock pins {match.group(1)}=={match.group(2)} but "
+            f"offline_wheel_overrides.txt has {version} for {machine}; "
+            "rebuild the wheel and update both together."
+        )
+    filename = url.rsplit("/", 1)[1]
+    if abi_tag not in filename:
+        sys.exit(f"{filename} is not built for CPython {py_version}.")
+    rewritten.append(line.split("\\", 1)[0].rstrip() + " \\")
+    rewritten.append(f"    --hash=sha256:{sha256}")
+    while index < len(lines) and lines[index].lstrip().startswith("--hash="):
+        index += 1
+    rows.append(f"{filename}\t{sha256}\t{url}\n")
+
+Path(requirements).write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+Path(plan).write_text("".join(rows), encoding="utf-8")
+PYCODE
+            while IFS=$'\t' read -r filename sha256 url; do
+                echo "    $filename (built for glibc 2.17)"
+                curl -fsSL --retry 3 -o "$OVERRIDE_DIR/$filename" "$url"
+                echo "$sha256  $OVERRIDE_DIR/$filename" | sha256sum -c --quiet -
+            done < "$OVERRIDE_PLAN"
+            INSTALL_ARGS+=(--find-links "$OVERRIDE_DIR")
+        fi
     fi
     echo "==> Installing dependencies (wheels only)..."
 else
@@ -258,20 +321,14 @@ fi
 
 # ── Verify ────────────────────────────────────────────────────────────
 # Runs after pruning so a prune mistake fails the build here instead of on a
-# user's machine.  Core probes always run (PIL.Image loads C extensions);
-# per-extra probes match the selected extras: the TUI subtree for tui,
-# lxml.etree (C extension via python-docx/pptx) for doc_converter,
-# opentelemetry.sdk for observability.
+# user's machine.  The probes cover C extensions (PIL.Image; lxml.etree via
+# python-docx/pptx), the TUI subtree and the OpenTelemetry SDK.
 echo "==> Verifying the bundled installation..."
-CHRYS_VERIFY_EXTRAS="$EXTRAS" "$PY" - <<'PYCODE'
-import importlib.metadata
-import os
+"$PY" - <<'PYCODE'
 import subprocess
 import sys
 
-version = importlib.metadata.version("chrys")
-extras = {e.strip() for e in os.environ.get("CHRYS_VERIFY_EXTRAS", "").split(",") if e.strip()}
-
+from chrys import __version__
 from chrys.foundation.vendor import find_rg
 
 rg = find_rg()
@@ -282,16 +339,15 @@ subprocess.run([rg, "--version"], check=True, capture_output=True)
 import chrys.app.cli.app  # noqa: F401  — the entry point every flavor boots through
 import anthropic, certifi, mcp, openai  # noqa: F401,E401
 import PIL.Image  # noqa: F401
+import chrys.app.tui.app  # noqa: F401  — heaviest import subtree
+import lxml.etree  # noqa: F401
+import opentelemetry.sdk  # noqa: F401
+# The C extensions some platforms build from source because PyPI has no
+# wheel for them: cryptography (static OpenSSL), grpc and setproctitle on
+# Windows on Arm, watchdog's on macOS.
+import cryptography.hazmat.bindings._rust, grpc, setproctitle, watchdog.observers  # noqa: F401,E401
 
-if "tui" in extras:
-    import chrys.app.tui.app  # noqa: F401  — heaviest import subtree
-    import textual  # noqa: F401
-if "doc_converter" in extras:
-    import lxml.etree  # noqa: F401
-if "observability" in extras:
-    import opentelemetry.sdk  # noqa: F401
-
-print(f"    chrys {version}")
+print(f"    chrys {__version__}")
 print(f"    rg     {rg}")
 print(f"    ca     {certifi.where()}")
 PYCODE

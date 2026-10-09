@@ -50,7 +50,14 @@ _WORKFLOW_WRITE_GRANTS = frozenset(
         ("tag-release.yml", "contents"),
     }
 )
-_JOB_WRITE_GRANTS = frozenset({("cd.yml", "release", "contents")})
+_JOB_WRITE_GRANTS = frozenset(
+    {
+        # Trusted Publishing: the OIDC token PyPI exchanges for an upload.
+        ("cd.yml", "publish-pypi", "id-token"),
+        ("cd.yml", "release", "contents"),
+        ("pillow-manylinux2014.yml", "publish", "contents"),
+    }
+)
 
 
 def workflow_files(directory: Path) -> list[Path]:

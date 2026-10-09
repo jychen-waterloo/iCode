@@ -14,6 +14,8 @@ import pytest
 
 from chrys.app.tui import i18n as tui_i18n
 from chrys.app.tui.app import ChrysApp
+from chrys.app.tui.screens.main.session_handlers import RestoreRequest
+from chrys.app.tui.screens.main.state import MainScreenState, RunState
 from chrys.foundation.config.settings import Settings
 from chrys.foundation.config.settings_store import LoadedSettings, SettingsHandle
 from chrys.foundation.events.bus import EventBus
@@ -22,6 +24,7 @@ from chrys.foundation.i18n import MessageRef
 from chrys.foundation.i18n.formatting import format_message
 from chrys.foundation.util.session_ids import session_short_id
 from chrys.orchestration.startup import RuntimeBootstrap
+from tests.support.tui_helpers import main_screen_parts
 
 
 def test_tui_startup_profile_resolves_preferred_agent() -> None:
@@ -417,17 +420,19 @@ def test_tui_help_does_not_offer_profile(monkeypatch: pytest.MonkeyPatch, capsys
 
 
 def _attach_startup_facade(screen: object) -> object:
-    """Add the public MainScreen startup facade to lightweight test doubles."""
+    """Add MainScreen's startup facade to a lightweight double, over the double's ``_state``."""
+    state, _services, _live_diff = main_screen_parts(screen)
 
     def set_startup_agent_loading(value: bool) -> None:
+        state.run.agent_loading = value
         screen._set_agent_loading(value)  # type: ignore[attr-defined]
 
     def is_startup_agent_loading() -> bool:
-        return bool(getattr(screen, "_agent_loading", False))
+        return state.run.agent_loading
 
-    async def restore_startup_session(session_id: str) -> bool:
+    async def restore_startup_session(session_id: str) -> str:
         await screen._sessions.do_session_restore(session_id, allow_while_loading=True)  # type: ignore[attr-defined]
-        return True
+        return "restored"
 
     async def dismiss_startup_load_dialog_before_restore() -> None:
         return
@@ -460,10 +465,9 @@ async def test_start_engine_surfaces_early_startup_failure() -> None:
             flashes.append((rendered, error))
 
     class _Screen:
-        _agent_loading = True
+        _state = MainScreenState(run=RunState(agent_loading=True))
 
         def _set_agent_loading(self, value: bool) -> None:
-            self._agent_loading = value
             loading_states.append(value)
 
         def query_one(self, cls: type) -> _StatusBar:
@@ -578,7 +582,9 @@ async def test_start_engine_restores_canonical_startup_session_id() -> None:
     assert app._startup_session_id == ""
 
 
-async def test_start_engine_falls_back_when_restore_emits_no_success() -> None:
+@pytest.mark.parametrize("outcome", ["failed", "declined"])
+async def test_start_engine_falls_back_when_restore_emits_no_success(outcome: str) -> None:
+    """A failed restore warns before the fresh start; one the user declined starts fresh quietly."""
     calls: list[tuple[str, object]] = []
 
     class _Engine:
@@ -597,21 +603,21 @@ async def test_start_engine_falls_back_when_restore_emits_no_success() -> None:
             return SimpleNamespace(session_id=session_id)
 
     class _Screen:
-        _agent_loading = True
+        loading = True
 
         def set_startup_agent_loading(self, value: bool) -> None:
-            self._agent_loading = value
+            self.loading = value
             calls.append(("loading", value))
 
         def is_startup_agent_loading(self) -> bool:
-            return self._agent_loading
+            return self.loading
 
         async def dismiss_startup_load_dialog_before_restore(self) -> None:
             return
 
-        async def restore_startup_session(self, session_id: str) -> bool:
+        async def restore_startup_session(self, session_id: str) -> str:
             calls.append(("restore", session_id))
-            return False
+            return outcome
 
         def cancel_startup_session_restore(self) -> None:
             calls.append(("cancel", None))
@@ -629,18 +635,21 @@ async def test_start_engine_falls_back_when_restore_emits_no_success() -> None:
 
     await app._start_engine(profile, _Screen())  # type: ignore[arg-type]
 
+    warning: list[tuple[str, object]] = [
+        (
+            "warning",
+            f"Could not restore session {session_short_id('session-1')}; started a new session instead.",
+            "Session",
+            "warning",
+        )
+    ]
     assert calls == [
         ("prepare", profile),
         ("loading", True),
         ("meta", "session-1"),
         ("restore", "session-1"),
         ("cancel", None),
-        (
-            "warning",
-            f"Could not restore session {session_short_id('session-1')}; started a new session instead.",
-            "Session",
-            "warning",
-        ),
+        *(warning if outcome == "failed" else []),
         ("reset_restore", None),
         ("start", profile),
     ]
@@ -648,26 +657,35 @@ async def test_start_engine_falls_back_when_restore_emits_no_success() -> None:
 
 async def test_main_screen_startup_restore_requires_matching_success_event() -> None:
     from chrys.app.tui.screens.main.screen import MainScreen
+    from chrys.app.tui.screens.main.state import MainScreenServices
     from chrys.foundation.events.types import SessionRestored
 
     bus = EventBus()
 
     class _Sessions:
-        def __init__(self, *, publish_success: bool) -> None:
+        def __init__(self, *, publish_success: bool, request: RestoreRequest = RestoreRequest.REQUESTED) -> None:
             self.publish_success = publish_success
+            self.request = request
 
-        async def do_session_restore(self, session_id: str, *, allow_while_loading: bool = False) -> None:
+        async def do_session_restore(self, session_id: str, *, allow_while_loading: bool = False) -> RestoreRequest:
             assert allow_while_loading is True
             if self.publish_success:
                 await bus.publish(SessionRestored(session_id=session_id))
+            return self.request
 
     screen = object.__new__(MainScreen)
-    screen._bus = bus
+    screen._services = MainScreenServices(bus=bus)
     screen._sessions = _Sessions(publish_success=False)
-    assert await MainScreen.restore_startup_session(screen, "session-1") is False
+    assert await MainScreen.restore_startup_session(screen, "session-1") == "failed"
+
+    screen._sessions = _Sessions(publish_success=False, request=RestoreRequest.SKIPPED)
+    assert await MainScreen.restore_startup_session(screen, "session-1") == "failed"
+
+    screen._sessions = _Sessions(publish_success=False, request=RestoreRequest.DECLINED)
+    assert await MainScreen.restore_startup_session(screen, "session-1") == "declined"
 
     screen._sessions = _Sessions(publish_success=True)
-    assert await MainScreen.restore_startup_session(screen, "session-1") is True
+    assert await MainScreen.restore_startup_session(screen, "session-1") == "restored"
 
 
 def test_main_screen_cancel_startup_restore_clears_restoring_state() -> None:
@@ -839,8 +857,6 @@ async def test_start_engine_missing_startup_session_warns_and_continues() -> Non
             flashes.append((format_message(message) if isinstance(message, MessageRef) else message, error))
 
     class _Screen:
-        _agent_loading = False
-
         def _set_agent_loading(self, value: bool) -> None:
             calls.append(("loading", value))
 
@@ -906,7 +922,6 @@ async def test_start_engine_startup_session_restore_failure_warns_and_continues(
             flashes.append((format_message(message) if isinstance(message, MessageRef) else message, error))
 
     class _Screen:
-        _agent_loading = False
         _sessions = _Sessions()
 
         def _set_agent_loading(self, value: bool) -> None:
@@ -1015,19 +1030,19 @@ async def test_start_engine_flushes_deferred_settings_warnings_when_falling_back
             return
 
     class _Screen:
-        _agent_loading = True
+        loading = True
 
         def set_startup_agent_loading(self, value: bool) -> None:
-            self._agent_loading = value
+            self.loading = value
 
         def is_startup_agent_loading(self) -> bool:
-            return self._agent_loading
+            return self.loading
 
         async def dismiss_startup_load_dialog_before_restore(self) -> None:
             return
 
-        async def restore_startup_session(self, session_id: str) -> bool:
-            return False
+        async def restore_startup_session(self, session_id: str) -> str:
+            return "failed"
 
         def cancel_startup_session_restore(self) -> None:
             return
