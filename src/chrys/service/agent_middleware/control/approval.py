@@ -515,11 +515,8 @@ class ApprovalMiddleware(FunctionMiddleware):
             async with OneShotCorrelation(self._bus, ApprovalResponse, request_id=request_id) as correlation:
                 future = correlation.future
                 try:
-                    judging = (
-                        self._approval_mode == ApprovalMode.AUTO
-                        and self._approval_judge is not None
-                        and not dev_sub_agent_review
-                    )
+                    review_mode = self._approval_mode
+                    judging = review_mode.uses_judge and self._approval_judge is not None and not dev_sub_agent_review
                     if judging:
                         # Frontends may synchronously block auto-fulfilment while handling
                         # ApprovalRequest, so install the shared arbitration subscription
@@ -575,6 +572,7 @@ class ApprovalMiddleware(FunctionMiddleware):
                                     ),
                                     log_dir=self._approval_log_dir,
                                     on_verdict=_record_judge_audit,
+                                    formal=review_mode is ApprovalMode.AUTO_FORMAL,
                                 )
                             )
 

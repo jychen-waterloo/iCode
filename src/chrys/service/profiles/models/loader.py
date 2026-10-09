@@ -240,7 +240,6 @@ def load_profile_from_yaml(path: Path) -> ModelProfile:
             api_key=data.get("api_key", ""),
             http_connect_timeout=_coerce_float(data, "http_connect_timeout", 10.0, path),
             http_read_timeout=_coerce_float(data, "http_read_timeout", 300.0, path),
-            formal_enabled=coerce_bool(data.get("formal_enabled"), default=False),
             http_max_retries=_coerce_int(data, "http_max_retries", 2, path),
             verify_ssl=coerce_bool(data.get("verify_ssl"), default=True),
             bypass_proxy=coerce_bool(data.get("bypass_proxy"), default=False),

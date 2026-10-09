@@ -258,7 +258,7 @@ class WorkflowSessionOwner:
         session = self.session
         session_id = self.require_session_id()
         profile, reasoning_profile = self._judge_model(node_model)
-        key = (profile.id, reasoning_profile.id if profile.formal_enabled else "")
+        key = (profile.id, reasoning_profile.id)
         judge = self._judges.get(key)
         if judge is None:
             judge = ApprovalJudge(

@@ -830,7 +830,7 @@ class AcpPermissionBroker:
             request_id = correlation.request_id
             future = correlation.future
             self._permission_waits[request_id] = future
-            judging = mode == ApprovalMode.AUTO and self._judge is not None
+            judging = mode.uses_judge and self._judge is not None
             judge_title, judge_kind, raw_args = _permission_judge_fields(tool_call)
             presentation_title = preview_text(tool_call.title or "tool", limit=_MAX_FIELD_CHARS - 4)
             published_args = _raw_args_dict(tool_call.raw_input)
@@ -903,6 +903,7 @@ class AcpPermissionBroker:
                             ),
                             log_dir=None,
                             on_verdict=lambda verdict: self._record_judge_audit(request_id, verdict.audit),
+                            formal=mode is ApprovalMode.AUTO_FORMAL,
                         ),
                     )
             except BaseException:

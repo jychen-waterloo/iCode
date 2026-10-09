@@ -102,7 +102,6 @@ async def _judge(
             model_id=model,
             base_url="https://provider.test/v1",
             api_key="synthetic-key",
-            formal_enabled=formal,
             stream=formal and model != "test",
             http_max_retries=0,
             http_read_timeout=5,
@@ -116,8 +115,10 @@ async def _judge(
         assert all(http.is_closed for http in http_clients)
 
 
-async def _evaluate(judge: ApprovalJudge) -> JudgeVerdict:
-    return await judge.evaluate("Inspect source", "read_file", "filesystem.read", {"path": "main.py"}, ["/workspace"])
+async def _evaluate(judge: ApprovalJudge, formal: bool = True) -> JudgeVerdict:
+    return await judge.evaluate(
+        "Inspect source", "read_file", "filesystem.read", {"path": "main.py"}, ["/workspace"], formal=formal
+    )
 
 
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test", "~typesafe/jev-test"])
@@ -180,6 +181,7 @@ async def test_all_false_approves_without_reasoning(monkeypatch, tmp_path, model
             ["/workspace"],
             request_id="safe",
             log_dir=tmp_path,
+            formal=True,
         )
         assert verdict.approved is True
         assert verdict.audit["approved"] is True
@@ -216,6 +218,7 @@ async def test_unknown_without_true_uses_main_reasoning_profile_and_direct_verdi
             {"path": "main.py"},
             ["/workspace"],
             user_messages=["Use this workspace", "Inspect source"],
+            formal=True,
         )
         assert verdict.approved is approved
         assert verdict.reason == "reasoning verdict"
@@ -266,7 +269,7 @@ async def test_disabled_formal_keeps_direct_even_with_jev_model_name(monkeypatch
     async with _judge(
         monkeypatch, ['{"approved":true,"reason":"direct"}'], model="typesafe/jev-test", formal=False
     ) as (judge, calls):
-        verdict = await _evaluate(judge)
+        verdict = await _evaluate(judge, formal=False)
         assert verdict.approved is True
         assert verdict.reason == "direct"
         assert verdict.audit is None
@@ -278,7 +281,14 @@ async def test_disabled_formal_keeps_direct_even_with_jev_model_name(monkeypatch
 async def test_missing_context_retains_manual_review_policy(monkeypatch, tmp_path, message, kind):
     async with _judge(monkeypatch, []) as (judge, calls):
         verdict = await judge.evaluate(
-            message, "read_file", kind, {"path": "main.py"}, ["/workspace"], request_id="invalid", log_dir=tmp_path
+            message,
+            "read_file",
+            kind,
+            {"path": "main.py"},
+            ["/workspace"],
+            request_id="invalid",
+            log_dir=tmp_path,
+            formal=True,
         )
         assert verdict.approved is False
         assert verdict.reason == "Approval judge input is invalid"
@@ -297,7 +307,7 @@ async def test_unusable_time_budget_records_audit_without_model_calls(monkeypatc
     async with _judge(monkeypatch, []) as (judge, calls):
         judge.profile.http_read_timeout = timeout
         verdict = await judge.evaluate(
-            "Inspect source", "read_file", "filesystem.read", {}, [], request_id="budget", log_dir=tmp_path
+            "Inspect source", "read_file", "filesystem.read", {}, [], request_id="budget", log_dir=tmp_path, formal=True
         )
         assert verdict.approved is False
         assert verdict.reason == "Approval judge time budget exhausted"
@@ -331,8 +341,7 @@ async def test_unavailable_sdk_transport_does_not_block_judging(monkeypatch, for
     monkeypatch.setattr(judge_module, "get_final_response", respond)
     async with _judge(monkeypatch, [], formal=formal) as (judge, _):
         # The reasoning stage uses Direct with transport auditing enabled, too.
-        judge._transport_audit_enabled = True
-        verdict = await _evaluate(judge)
+        verdict = await _evaluate(judge, formal=formal)
         assert verdict.approved is True
         assert respond.await_count == (2 if formal else 1)
         if formal:
@@ -343,11 +352,39 @@ async def test_unavailable_sdk_transport_does_not_block_judging(monkeypatch, for
 
 
 async def test_openai_sdk_transport_contract(monkeypatch):
-    async with _judge(monkeypatch, []) as (judge, _):
+    async with _judge(monkeypatch, [_reply(_values(), "test")]) as (judge, _):
         client = await judge._get_client()
         transport = getattr(client.sdk_client, "_client", None)
         assert isinstance(transport, httpx.AsyncClient), "Revisit transport auditing after an OpenAI SDK change"
+        assert transport.event_hooks["request"].count(judge_module._count_transport_request) == 0
+        assert (await _evaluate(judge)).approved is True
         assert transport.event_hooks["request"].count(judge_module._count_transport_request) == 1
+
+
+async def test_one_judge_switches_direct_and_formal_without_model_configuration(monkeypatch):
+    replies = ['{"approved":true,"reason":"direct"}', _reply(_values() | {"external_action": True}, "test")]
+    async with _judge(monkeypatch, replies) as (judge, calls):
+        direct = await _evaluate(judge, formal=False)
+        formal = await _evaluate(judge, formal=True)
+        assert direct.approved is True and direct.audit is None
+        assert formal.approved is False and formal.audit["stages"] == ["predicate"]
+        first, second = [json.loads(c.content)["messages"][0]["content"] for c in calls]
+        assert first == judge_module._SYSTEM_PROMPT
+        assert "Fixed principles:" in second
+
+
+async def test_direct_mode_with_a_jev_judge_uses_the_main_model(monkeypatch):
+    async with _judge(monkeypatch, ['{"approved":true,"reason":"direct"}'], model="typesafe/jev-test") as (
+        judge,
+        calls,
+    ):
+        verdict = await _evaluate(judge, formal=False)
+        assert verdict.approved is True and verdict.audit is None
+        assert len(calls) == 1
+        body = json.loads(calls[0].content)
+        assert str(calls[0].url) == "https://reasoning.test/v1/chat/completions"
+        assert body["model"] == _REASONING.model_id
+        assert body["messages"][0]["content"] == judge_module._SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test"])
@@ -365,6 +402,7 @@ async def test_empty_latest_message_uses_shared_user_context(monkeypatch, model)
             {"path": "main.py"},
             ["/workspace"],
             user_messages=["Inspect the parent session source"],
+            formal=True,
         )
         assert verdict.approved is True
         assert verdict.audit["application_attempts"] == len(calls) == 2
@@ -624,7 +662,14 @@ async def test_concurrent_requests_keep_context_and_audits_separate(monkeypatch,
         args = {"path": "first.py"}
         first = asyncio.create_task(
             judge.evaluate(
-                "Inspect first", "read_file", "filesystem.read", args, ["/first"], request_id="first", log_dir=tmp_path
+                "Inspect first",
+                "read_file",
+                "filesystem.read",
+                args,
+                ["/first"],
+                request_id="first",
+                log_dir=tmp_path,
+                formal=True,
             )
         )
         try:
@@ -632,7 +677,7 @@ async def test_concurrent_requests_keep_context_and_audits_separate(monkeypatch,
             assert entered.is_set() and not first.done()
             args["path"] = "second.py"
             second = await judge.evaluate(
-                "Push second", "shell", "shell", args, ["/second"], request_id="second", log_dir=tmp_path
+                "Push second", "shell", "shell", args, ["/second"], request_id="second", log_dir=tmp_path, formal=True
             )
             release.set()
             verdict = await first

@@ -510,13 +510,11 @@ class ApprovalJudge:
         self._client_lock = asyncio.Lock()
         self._closed = False
         self._chat_options: dict[str, Any] | None = None
-        self._formal_enabled = profile.formal_enabled
-        self._transport_audit_enabled = self._formal_enabled
         self._predicate_asset: PredicateAsset | None = None
         self._transport_audited = False
         self._close = OnceClose(self._close_clients)
         self._reasoning_judge: ApprovalJudge | None = None
-        if self._formal_enabled and reasoning_profile is not None:
+        if reasoning_profile is not None:
             from chrys.service.llm.route_sessions import derive_llm_route_session_id
 
             reasoning_session_id = (
@@ -530,7 +528,6 @@ class ApprovalJudge:
             self._reasoning_judge = ApprovalJudge(
                 reasoning_profile, reasoning_session_id, parent_session_id, session_dir
             )
-            self._reasoning_judge._transport_audit_enabled = True
 
     @property
     def profile(self) -> ModelProfile:
@@ -553,17 +550,6 @@ class ApprovalJudge:
                     session_dir=self._session_dir,
                 )
                 self._chat_options = effective_chat_options(self._profile)
-                if self._transport_audit_enabled and self._profile.provider in {
-                    "openai",
-                    "deepseek-openai",
-                    "glm-openai",
-                }:
-                    # SDK boundary: count requests on the owned provider transport.
-                    transport = getattr(self._client.sdk_client, "_client", None)
-                    if isinstance(transport, httpx.AsyncClient):
-                        if _count_transport_request not in transport.event_hooks["request"]:
-                            transport.event_hooks["request"].append(_count_transport_request)
-                        self._transport_audited = True
             return self._client
 
     async def aclose(self) -> None:
@@ -593,12 +579,24 @@ class ApprovalJudge:
         request_id: str = "",
         log_dir: Path | None = None,
         user_messages: list[str] | None = None,
+        formal: bool = False,
     ) -> JudgeVerdict:
         """Route Formal predicates to approval, human review, or the Direct judge."""
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise asyncio.CancelledError
-        if not self._formal_enabled:
+        if not formal:
+            if is_jev_profile(self._profile) and self._reasoning_judge is not None:
+                return await self._reasoning_judge.evaluate(
+                    user_message,
+                    tool_name,
+                    tool_kind,
+                    args,
+                    workspace_roots,
+                    request_id,
+                    log_dir,
+                    user_messages,
+                )
             return await self._evaluate_direct(
                 user_message=user_message,
                 tool_name=tool_name,
@@ -849,6 +847,13 @@ class ApprovalJudge:
             raise asyncio.CancelledError
         if time.monotonic() >= audit.deadline:
             raise TimeoutError
+        if not self._transport_audited and self._profile.provider in {"openai", "deepseek-openai", "glm-openai"}:
+            # The profile may have been used in Direct mode before this call.
+            transport = getattr(self._client.sdk_client, "_client", None)
+            if isinstance(transport, httpx.AsyncClient):
+                if _count_transport_request not in transport.event_hooks["request"]:
+                    transport.event_hooks["request"].append(_count_transport_request)
+                self._transport_audited = True
         call: dict[str, Any] = {
             "ordinal": len(audit.calls) + 1,
             "stage": audit.stages[-1],

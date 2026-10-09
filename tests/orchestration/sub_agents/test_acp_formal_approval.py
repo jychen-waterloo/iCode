@@ -38,7 +38,6 @@ async def test_invalid_formal_context_waits_for_human_allow(monkeypatch, kind, m
             model_id="test",
             base_url="https://provider.test/v1",
             api_key="synthetic-key",
-            formal_enabled=True,
         )
     )
     get_client = create_autospec(judge._get_client, side_effect=AssertionError("Model must not be called"))
@@ -47,7 +46,7 @@ async def test_invalid_formal_context_waits_for_human_allow(monkeypatch, kind, m
         event_bus=bus,
         session_id="parent",
         caller_name="External",
-        mode_getter=lambda: ApprovalMode.AUTO,
+        mode_getter=lambda: ApprovalMode.AUTO_FORMAL,
         turn_context=context,
         workspace_roots=["/workspace"],
         workspace_cwd="/workspace",

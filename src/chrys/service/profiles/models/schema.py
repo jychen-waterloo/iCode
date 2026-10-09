@@ -52,7 +52,6 @@ class ModelProfile:
     chat_options: str = ""  # JSON object of provider request options
     stream: bool = True  # Stream response
     vision: bool = False  # Supports image input
-    formal_enabled: bool = False  # Opt-in predicate approval for this Judge profile
     # Chat Completions: a stream that ends without a finish reason fails as
     # truncated instead of being accepted with a warning.
     stream_requires_finish_reason: bool = False

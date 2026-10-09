@@ -1914,7 +1914,6 @@ class ModelConfigScreen(BaseDialog[str]):
             chat_options=_kv_to_json(options),
             stream=self.query_one("#mc-stream", Checkbox).value,
             vision=self.query_one("#mc-vision", Checkbox).value,
-            formal_enabled=stored.formal_enabled if stored is not None else False,
             stream_requires_finish_reason=stored is not None and stored.stream_requires_finish_reason,
             thinking_block_binding=stored.thinking_block_binding if stored is not None else "auto",
             auto_interleaved_thinking=stored.auto_interleaved_thinking if stored is not None else True,

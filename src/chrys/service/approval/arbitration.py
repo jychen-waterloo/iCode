@@ -55,6 +55,7 @@ class ApprovalDecisionArbiter:
         approved_value: Any,
         log_dir: Path | None,
         on_verdict: Callable[[JudgeVerdict], None] | None = None,
+        formal: bool = False,
     ) -> None:
         """Publish a verdict and fulfil only while no user decision has won."""
         from chrys.service.approval.judge import FormalEvaluationCancelled, JudgeVerdict
@@ -73,6 +74,7 @@ class ApprovalDecisionArbiter:
                 workspace_roots=list(judge_input.workspace_roots),
                 request_id=request_id,
                 log_dir=log_dir,
+                formal=formal,
             )
         except FormalEvaluationCancelled as exc:
             # Owner-only evidence (e.g. ACP audit ring); no UI verdict and no
