@@ -133,7 +133,7 @@ def assemble_agent_engine(
         trajectory_recorder=recorder,
         fsm=fsm,
         mcp_cache=mcp_cache,
-        turn_context=TurnContextHolder(),
+        turn_context=TurnContextHolder(lambda: history.compact_context if history.is_bound else ""),
         mcp_overlay=mcp_overlay,
         allow_user_interaction=allow_user_interaction,
         build_agent_fn=build_agent,

@@ -61,6 +61,7 @@ class _HeldJudge:
         log_dir: Path | None = None,
         user_messages: list[str] | None = None,
         formal: bool = False,
+        compact_context: str = "",
     ) -> JudgeVerdict:
         self.entered.set()
         try:

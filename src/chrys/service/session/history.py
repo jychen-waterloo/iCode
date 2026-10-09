@@ -36,7 +36,7 @@ from chrys.foundation.models.turns import (
 from chrys.foundation.platform.files import surrogate_safe_text
 from chrys.foundation.tool_invocation_order import read_tool_invocation_order
 from chrys.foundation.tool_kinds import KIND_SUB_AGENT
-from chrys.foundation.trajectory.metadata import ensure_analytics_item_id
+from chrys.foundation.trajectory.metadata import ensure_analytics_item_id, read_analytics_item_id
 from chrys.kernel import Message
 from chrys.kernel.exchanges import (
     PREVALIDATION_ERROR_KINDS,
@@ -346,6 +346,53 @@ class SessionHistoryManager:
     def messages(self) -> list:
         """The active message list (may be empty)."""
         return self.state.get("messages", [])
+
+    @property
+    def compact_context(self) -> str:
+        """Effective summaries still present in the active conversation."""
+        from chrys.service.context.providers.history import CompressedBlock
+
+        blocks = {
+            block.compressed_context_id
+            if isinstance(block, CompressedBlock)
+            else block["compressed_context_id"]: block.summary_text
+            if isinstance(block, CompressedBlock)
+            else block["summary_text"]
+            for block in self.state.get("compressed_msgs", [])
+        }
+        summaries: list[str] = []
+        for raw in self.messages:
+            message = raw if isinstance(raw, Message) else Message.from_dict(raw)
+            if message.additional_properties.get(HistoryMarkerKind.KEY) == HistoryMarkerKind.SUMMARY:
+                summary = blocks.get(message.additional_properties.get("_block_id"), message.text).strip()
+                if summary:
+                    summaries.append(summary)
+        return "\n\n".join(summaries)
+
+    @property
+    def user_prompts(self) -> list[str]:
+        """Real user texts across archived and active history, in session order."""
+        from chrys.service.context.providers.history import CompressedBlock
+
+        messages = []
+        for block in self.state.get("compressed_msgs", []):
+            messages.extend(block.messages if isinstance(block, CompressedBlock) else block["messages"])
+        messages.extend(self.messages)
+        prompts: list[str] = []
+        seen: set[str] = set()
+        for raw in messages:
+            message = raw if isinstance(raw, Message) else Message.from_dict(raw)
+            if message.role != "user" or is_continuation_message(message):
+                continue
+            item_id = read_analytics_item_id(message.additional_properties)
+            if item_id is not None:
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+            text = (message.text or "").strip()
+            if text:
+                prompts.append(text)
+        return prompts
 
     def get_deep_copy(self) -> dict[str, Any] | None:
         """Return a deep copy of the current state, or ``None`` if empty."""

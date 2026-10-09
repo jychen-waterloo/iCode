@@ -387,6 +387,32 @@ async def test_direct_mode_with_a_jev_judge_uses_the_main_model(monkeypatch):
         assert body["messages"][0]["content"] == judge_module._SYSTEM_PROMPT
 
 
+async def test_compact_context_is_identical_for_predicate_and_direct_fallback(monkeypatch):
+    replies = [_reply(_values("unknown"), "test"), '{"approved":true,"reason":"direct"}']
+    async with _judge(monkeypatch, replies) as (judge, calls):
+        verdict = await judge.evaluate(
+            "request 101",
+            "bash",
+            "shell",
+            {"command": "inspect"},
+            ["/workspace"],
+            user_messages=[f"request {n}" for n in range(1, 101)],
+            formal=True,
+            compact_context="Earlier requests summary",
+        )
+        assert verdict.approved is True
+        assert verdict.audit["stages"] == ["predicate", "reasoning"]
+        assert len(calls) == 2
+        user_sections = []
+        for call in calls:
+            prompt = json.loads(call.content)["messages"][1]["content"]
+            assert "<compact_context>\nEarlier requests summary\n</compact_context>" in prompt
+            section = prompt.split("Session user prompts:\n", 1)[1].split("\n\nLatest user prompt:", 1)[0]
+            assert section == "\n".join(f"{i}. request {n}" for i, n in enumerate(range(94, 102), 1))
+            user_sections.append(section)
+        assert user_sections[0] == user_sections[1]
+
+
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test"])
 async def test_empty_latest_message_uses_shared_user_context(monkeypatch, model):
     async with _judge(

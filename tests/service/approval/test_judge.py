@@ -12,10 +12,31 @@ from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 import pytest
 
 from chrys.kernel import Content, Message
-from chrys.service.approval.judge import ApprovalJudge, JudgeVerdict, _assistant_retry_messages, _parse_verdict
+from chrys.service.approval.judge import (
+    ApprovalJudge,
+    JudgeVerdict,
+    _assistant_retry_messages,
+    _build_user_prompt,
+    _parse_verdict,
+)
 from chrys.service.profiles.models.resolver import default_profile
 
 # ─── _parse_verdict ─────────────────────────────────────────────────
+
+
+def test_compact_prompt_keeps_latest_eight_including_new_input(monkeypatch) -> None:
+    monkeypatch.setattr("chrys.service.approval.judge._current_time_context", lambda: "fixed time")
+    prompts = [f"request {i}" for i in range(1, 101)]
+    plain = _build_user_prompt("request 101", "bash", "shell", {}, [], prompts)
+    empty = _build_user_prompt("request 101", "bash", "shell", {}, [], prompts, "")
+    assert plain == empty
+    assert "<compact_context>" not in plain
+    assert "101. request 101" in plain
+    compacted = _build_user_prompt("request 101", "bash", "shell", {}, [], prompts, "Earlier tasks summary")
+    assert "<compact_context>\nEarlier tasks summary\n</compact_context>\n\nSession user prompts:" in compacted
+    user_section = compacted.split("Session user prompts:\n", 1)[1].split("\n\nLatest user prompt:", 1)[0]
+    assert user_section == "\n".join(f"{i}. request {n}" for i, n in enumerate(range(94, 102), 1))
+    assert "Latest user prompt:\nrequest 101" in compacted
 
 
 def test_parse_verdict_approved() -> None:
@@ -274,7 +295,7 @@ async def test_evaluate_returns_valid_verdict_on_first_try() -> None:
     user_prompt = client.calls[0][1].text
     assert "Current time (local): " in user_prompt
     assert "Current time (UTC): " in user_prompt
-    assert "Current-turn user prompts:\n1. read the file" in user_prompt
+    assert "Session user prompts:\n1. read the file" in user_prompt
     assert "Latest user prompt:\nread the file" in user_prompt
 
 
@@ -294,7 +315,7 @@ async def test_evaluate_includes_all_current_turn_user_messages() -> None:
 
     assert verdict.approved is True
     user_prompt = client.calls[0][1].text
-    assert "Current-turn user prompts:\n1. 这个代码仓是做什么的?\n2. 当前代码仓有多少行代码?" in user_prompt
+    assert "Session user prompts:\n1. 这个代码仓是做什么的?\n2. 当前代码仓有多少行代码?" in user_prompt
     assert "Latest user prompt:\n当前代码仓有多少行代码?" in user_prompt
 
 

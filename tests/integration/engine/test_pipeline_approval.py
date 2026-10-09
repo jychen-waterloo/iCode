@@ -28,7 +28,7 @@ from chrys.foundation.events.types import (
 from chrys.foundation.models.approval_reuse import ReuseChoice
 from chrys.foundation.models.history_markers import HistoryMarkerKind
 from chrys.foundation.tool_kinds import KIND_SKILL
-from chrys.service.approval.judge import ApprovalJudge, JudgeVerdict
+from chrys.service.approval.judge import ApprovalJudge, JudgeVerdict, _build_user_prompt
 from chrys.service.llm.mock import MockResponse
 from chrys.service.profiles.agents.schema import SkillConfig, SkillsConfig
 from chrys.service.skills.constants import RUN_SKILL_SCRIPT_TOOL_NAME
@@ -54,6 +54,46 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # S4: Approval auto-approve with rollback
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["auto", "auto-formal"])
+async def test_judge_receives_user_prompts_across_completed_turns(make_pipeline_ctx, monkeypatch, mode) -> None:
+    observed: list[tuple[str, list[str]]] = []
+
+    async def evaluate(
+        _judge: ApprovalJudge,
+        user_message: str,
+        tool_name: str,
+        tool_kind: str,
+        args: dict[str, Any],
+        workspace_roots: list[str],
+        request_id: str = "",
+        log_dir: Path | None = None,
+        user_messages: list[str] | None = None,
+        formal: bool = False,
+        compact_context: str = "",
+    ) -> JudgeVerdict:
+        observed.append((user_message, list(user_messages or [])))
+        assert formal is (mode == "auto-formal")
+        return JudgeVerdict(True, "test approval")
+
+    monkeypatch.setattr(ApprovalJudge, "evaluate", create_autospec(ApprovalJudge.evaluate, side_effect=evaluate))
+    ctx = await make_pipeline_ctx(
+        [
+            MockResponse(tool_calls=[("guarded_echo", "first", {"message": "first"})]),
+            MockResponse(text="First task completed"),
+            MockResponse(tool_calls=[("guarded_echo", "second", {"message": "second"})]),
+            MockResponse(text="Second task completed"),
+        ],
+        approval_overrides={"guarded_echo": "require"},
+    )
+    await ctx.bus.publish(SetApprovalMode(mode=mode, persist=False))
+    await ctx.send_message("Inspect the project")
+    await ctx.send_message("Also check its tests")
+    assert observed == [
+        ("Inspect the project", ["Inspect the project"]),
+        ("Also check its tests", ["Inspect the project", "Also check its tests"]),
+    ]
 
 
 class TestAutoApproval:
@@ -370,6 +410,7 @@ class TestInterruptWhileTheJudgeReviews:
             log_dir: Path | None = None,
             user_messages: list[str] | None = None,
             formal: bool = False,
+            compact_context: str = "",
         ) -> JudgeVerdict:
             entered.set()
             try:
@@ -725,6 +766,56 @@ class TestCompressionWithApproval:
 
     Verifies state consistency: blocks match summaries, no stale flags.
     """
+
+    @pytest.mark.parametrize("mode", ["auto", "auto-formal"])
+    async def test_judge_sees_compaction_created_during_the_running_turn(
+        self, make_pipeline_ctx, monkeypatch, mode
+    ) -> None:
+        prompts: list[str] = []
+
+        async def evaluate(
+            _judge: ApprovalJudge,
+            user_message: str,
+            tool_name: str,
+            tool_kind: str,
+            args: dict[str, Any],
+            workspace_roots: list[str],
+            request_id: str = "",
+            log_dir: Path | None = None,
+            user_messages: list[str] | None = None,
+            formal: bool = False,
+            compact_context: str = "",
+        ) -> JudgeVerdict:
+            assert formal is (mode == "auto-formal")
+            assert compact_context == "Earlier requests summary"
+            prompts.append(
+                _build_user_prompt(
+                    user_message, tool_name, tool_kind, args, workspace_roots, user_messages, compact_context
+                )
+            )
+            return JudgeVerdict(True, "test approval")
+
+        monkeypatch.setattr(ApprovalJudge, "evaluate", create_autospec(ApprovalJudge.evaluate, side_effect=evaluate))
+        ctx = await make_pipeline_ctx(
+            [
+                *[MockResponse(text=f"R{i}") for i in range(1, 11)],
+                MockResponse(
+                    tool_calls=[
+                        ("compress_context", "cc", {"marker_id": "turn_9", "summary": "Earlier requests summary"})
+                    ]
+                ),
+                MockResponse(tool_calls=[("guarded_echo", "g", {"message": "after compression"})]),
+                MockResponse(text="Done"),
+            ],
+            approval_overrides={"guarded_echo": "require"},
+        )
+        await ctx.bus.publish(SetApprovalMode(mode=mode, persist=False))
+        for i in range(1, 12):
+            await ctx.send_message(f"request {i}")
+        assert len(prompts) == 1
+        assert "<compact_context>\nEarlier requests summary\n</compact_context>" in prompts[0]
+        user_section = prompts[0].split("Session user prompts:\n", 1)[1].split("\n\nLatest user prompt:", 1)[0]
+        assert user_section == "\n".join(f"{i}. request {n}" for i, n in enumerate(range(4, 12), 1))
 
     @pytest.mark.parametrize(
         ("stream_kwargs", "approve"),

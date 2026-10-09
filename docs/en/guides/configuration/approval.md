@@ -15,7 +15,7 @@ The four approval modes behave as follows:
 | AUTO-FORMAL | Checks risks individually, applies fixed approval rules, and uses model review when uncertain. |
 | BYPASS | Tool calls run without asking, even when the agent configuration or safety rules require approval. |
 
-**Approval judge model**: In automatic mode, iCode calls the approval judge model and sends it the current time, the workspace directories, all user prompts of the current turn and the latest of them, and the tool name, tool kind, and arguments. By default, the approval judge uses the current session's model. To change it, press **F10** to open **Settings**, select the **Models & Agents** tab, and change **Approval judge model** in the **Model roles** section.
+**Approval judge model**: In automatic mode, iCode calls the approval judge model and sends it the current time, the workspace directories, the session's user prompts and the latest of them, and the tool name, tool kind, and arguments. Before compression, earlier user prompts are retained across turns and retries. After compression, review uses the existing summaries and at most eight recent user prompts, including the latest input; synthetic continuation messages are excluded. Without a summary, the prompt format stays unchanged. By default, the approval judge uses the current session's model. To change it, press **F10** to open **Settings**, select the **Models & Agents** tab, and change **Approval judge model** in the **Model roles** section.
 
 > **Tip**
 >

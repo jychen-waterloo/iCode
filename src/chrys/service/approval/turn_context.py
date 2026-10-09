@@ -1,9 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Shared current-turn user context for approval consumers."""
+"""Shared user context for approval consumers."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 
@@ -17,12 +18,21 @@ class TurnContextReader(Protocol):
     @property
     def user_messages(self) -> list[str]: ...
 
+    @property
+    def compact_context(self) -> str: ...
+
 
 class TurnContextHolder:
     """Mutable run-owned context shared by main and ACP approval paths."""
 
-    def __init__(self) -> None:
+    def __init__(self, compact_context_provider: Callable[[], str] | None = None) -> None:
         self._messages: list[str] = []
+        self._compact_context_provider = compact_context_provider
+
+    @property
+    def compact_context(self) -> str:
+        """Read current summaries, including compaction during a running turn."""
+        return self._compact_context_provider() if self._compact_context_provider is not None else ""
 
     @property
     def user_message(self) -> str:

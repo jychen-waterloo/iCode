@@ -249,6 +249,10 @@ class _History:
     def __init__(self) -> None:
         self.messages: list[Message] = []
 
+    @property
+    def user_prompts(self) -> list[str]:
+        return [message.text for message in self.messages if message.role == "user"]
+
     def has_trailing_error_markers(self) -> bool:
         raise AssertionError("history markers should not be inspected")
 

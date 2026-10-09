@@ -271,6 +271,10 @@ class _History:
         self.removed_orphaned_user_messages = 0
         self.messages: list[Message] = []
 
+    @property
+    def user_prompts(self) -> list[str]:
+        return [message.text for message in self.messages if message.role == "user"]
+
     def remove_trailing_markers(self) -> None:
         self.removed_trailing_markers += 1
 

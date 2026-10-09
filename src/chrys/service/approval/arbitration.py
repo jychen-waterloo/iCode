@@ -28,6 +28,7 @@ class ApprovalJudgeInput:
     user_message: str
     user_messages: list[str]
     workspace_roots: list[str]
+    compact_context: str = ""
 
 
 class ApprovalDecisionArbiter:
@@ -75,6 +76,7 @@ class ApprovalDecisionArbiter:
                 request_id=request_id,
                 log_dir=log_dir,
                 formal=formal,
+                compact_context=judge_input.compact_context,
             )
         except FormalEvaluationCancelled as exc:
             # Owner-only evidence (e.g. ACP audit ring); no UI verdict and no
