@@ -290,11 +290,11 @@ class ApprovalMiddleware(FunctionMiddleware):
         self.set_user_messages([text] if text else [])
 
     def set_user_messages(self, messages: list[str]) -> None:
-        """Store session user messages for inclusion in approval judge context."""
+        """Store current-turn user messages for inclusion in approval judge context."""
         self._turn_context.replace(messages)
 
     def append_user_message(self, text: str) -> None:
-        """Append live user input for later approval judge context."""
+        """Append a current-turn user message for later approval judge context."""
         self._turn_context.append(text)
 
     def remove_user_message(self, text: str) -> None:
@@ -559,7 +559,6 @@ class ApprovalMiddleware(FunctionMiddleware):
                                     judge_input=ApprovalJudgeInput(
                                         user_message=self._turn_context.user_message,
                                         user_messages=self._turn_context.user_messages,
-                                        compact_context=self._turn_context.compact_context,
                                         tool_name=tool_name,
                                         tool_kind=tool_kind,
                                         args=parsed_args,

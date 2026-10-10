@@ -15,7 +15,7 @@ The four approval modes behave as follows:
 | AUTO-FORMAL | Checks risks individually, applies fixed approval rules, and uses model review when uncertain. |
 | BYPASS | Tool calls run without asking, even when the agent configuration or safety rules require approval. |
 
-**Approval judge model**: In automatic mode, iCode calls the approval judge model and sends it the current time, the workspace directories, the session's user prompts and the latest of them, and the tool name, tool kind, and arguments. Before compression, earlier user prompts are retained across turns and retries. After compression, review uses the existing summaries and at most eight recent user prompts, including the latest input; synthetic continuation messages are excluded. Without a summary, the prompt format stays unchanged. By default, the approval judge uses the current session's model. To change it, press **F10** to open **Settings**, select the **Models & Agents** tab, and change **Approval judge model** in the **Model roles** section.
+**Approval judge model**: In automatic mode, iCode calls the approval judge model and sends it the current time, the workspace directories, all user prompts of the current turn and the latest of them, and the tool name, tool kind, and arguments. By default, the approval judge uses the current session's model. To change it, press **F10** to open **Settings**, select the **Models & Agents** tab, and change **Approval judge model** in the **Model roles** section.
 
 > **Tip**
 >
@@ -25,9 +25,11 @@ The four approval modes behave as follows:
 
 Type `/approval auto-formal`, or choose AUTO-FORMAL in the approval mode list, to enable Formal without editing a model YAML file. The selected approval judge (an ordinary LLM or Jev) checks seven risk conditions individually.
 
+Tools without a kind are still reviewed. Missing tool names or user context require human approval without a model call.
+
 Confirmed risks flag the call for human approval, with the triggering conditions shown in the existing dialog. If every condition is confirmed false, the call is automatically approved. If no risk is confirmed but some conditions cannot be determined, the main model reviews the call using the original approval prompt. Select an ordinary LLM for that main model; Jev cannot perform this step. Workflows use their node's effective model, falling back to the run model.
 
-Each risk is checked independently: even an explicitly requested `git push` needs human approval because it changes an external repository. Both stages and retries share the approval judge's configured read timeout (default: 300 seconds). Missing input, invalid responses or timeouts leave the call for human approval; cancelling the task cancels its review.
+Each risk is checked independently: even an explicitly requested `git push` needs human approval because it changes an external repository. Each stage uses its own model's configured read timeout (default: 300 seconds), shared by that stage's retries. Missing input, invalid responses or timeouts leave the call for human approval; cancelling the task cancels its review.
 
 Type `/approval auto` to return to the original Direct verdict. If the selected judge is Jev, ordinary automatic mode uses the main model. Read-only fast paths, remembered approvals and human-decision priority remain unchanged; model approvals never create remembered grants.
 

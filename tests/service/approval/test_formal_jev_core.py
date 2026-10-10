@@ -277,13 +277,13 @@ async def test_disabled_formal_keeps_direct_even_with_jev_model_name(monkeypatch
         assert calls[0].url.path == "/v1/chat/completions"
 
 
-@pytest.mark.parametrize("message,kind", [("Inspect source", ""), ("", "filesystem.read")])
-async def test_missing_context_retains_manual_review_policy(monkeypatch, tmp_path, message, kind):
+@pytest.mark.parametrize("message,tool_name", [("Inspect source", ""), ("", "read_file")])
+async def test_missing_context_retains_manual_review_policy(monkeypatch, tmp_path, message, tool_name):
     async with _judge(monkeypatch, []) as (judge, calls):
         verdict = await judge.evaluate(
             message,
-            "read_file",
-            kind,
+            tool_name,
+            "filesystem.read",
             {"path": "main.py"},
             ["/workspace"],
             request_id="invalid",
@@ -300,6 +300,25 @@ async def test_missing_context_retains_manual_review_policy(monkeypatch, tmp_pat
         saved = json.loads((tmp_path / "invalid.formal.jsonl").read_text())
         assert saved["failure_reason"] == "invalid_input"
         assert saved["request_id"] == "invalid"
+
+
+@pytest.mark.parametrize("model", ["test", "typesafe/jev-test"])
+@pytest.mark.parametrize("triggered", [False, True])
+@pytest.mark.parametrize("kind", ["", "   "])
+async def test_missing_tool_kind_still_uses_predicate_review(monkeypatch, model, triggered, kind):
+    values = _values() | {"external_action": triggered}
+    async with _judge(monkeypatch, [_reply(values, model)], model=model) as (judge, calls):
+        verdict = await judge.evaluate(
+            "Inspect source", "read_file", kind, {"path": "main.py"}, ["/workspace"], formal=True
+        )
+        assert verdict.approved is (not triggered)
+        assert len(calls) == 1
+        assert verdict.audit["stages"] == ["predicate"]
+        assert verdict.audit["failure_reason"] is None
+        assert verdict.audit["predicate_results"] == [{"id": key, "value": value} for key, value in values.items()]
+        body = json.loads(calls[0].content)
+        messages = body["messages"] if model == "test" else body["state"]["messages"]
+        assert f"Tool: read_file (kind: {kind})" in messages[1]["content"]
 
 
 @pytest.mark.parametrize("timeout", [0, -1, None])
@@ -385,32 +404,6 @@ async def test_direct_mode_with_a_jev_judge_uses_the_main_model(monkeypatch):
         assert str(calls[0].url) == "https://reasoning.test/v1/chat/completions"
         assert body["model"] == _REASONING.model_id
         assert body["messages"][0]["content"] == judge_module._SYSTEM_PROMPT
-
-
-async def test_compact_context_is_identical_for_predicate_and_direct_fallback(monkeypatch):
-    replies = [_reply(_values("unknown"), "test"), '{"approved":true,"reason":"direct"}']
-    async with _judge(monkeypatch, replies) as (judge, calls):
-        verdict = await judge.evaluate(
-            "request 101",
-            "bash",
-            "shell",
-            {"command": "inspect"},
-            ["/workspace"],
-            user_messages=[f"request {n}" for n in range(1, 101)],
-            formal=True,
-            compact_context="Earlier requests summary",
-        )
-        assert verdict.approved is True
-        assert verdict.audit["stages"] == ["predicate", "reasoning"]
-        assert len(calls) == 2
-        user_sections = []
-        for call in calls:
-            prompt = json.loads(call.content)["messages"][1]["content"]
-            assert "<compact_context>\nEarlier requests summary\n</compact_context>" in prompt
-            section = prompt.split("Session user prompts:\n", 1)[1].split("\n\nLatest user prompt:", 1)[0]
-            assert section == "\n".join(f"{i}. request {n}" for i, n in enumerate(range(94, 102), 1))
-            user_sections.append(section)
-        assert user_sections[0] == user_sections[1]
 
 
 @pytest.mark.parametrize("model", ["test", "typesafe/jev-test"])
@@ -631,7 +624,8 @@ async def test_cancellation_stays_cancellation_at_either_stage(monkeypatch, stag
             await asyncio.gather(task, return_exceptions=True)
 
 
-async def test_stages_share_deadline_and_reject_late_approval(monkeypatch):
+@pytest.mark.parametrize("reasoning_end", [106.0, 165.0])
+async def test_stages_use_own_deadlines_and_reject_late_approval(monkeypatch, reasoning_end):
     from chrys.kernel import ChatResponse, Message
 
     clock = [100.0]
@@ -643,7 +637,7 @@ async def test_stages_share_deadline_and_reject_late_approval(monkeypatch):
 
     async def response(client, messages, *, stream, options, timeout):
         reasoning = messages[0].text == _SYSTEM_PROMPT
-        clock[0] = 106.0 if reasoning else 104.0
+        clock[0] = reasoning_end if reasoning else 104.0
         result = {"approved": True, "reason": "late"} if reasoning else _values("unknown")
         return ChatResponse(messages=[Message("assistant", [json.dumps(result)])])
 
@@ -658,10 +652,23 @@ async def test_stages_share_deadline_and_reject_late_approval(monkeypatch):
     )
     async with _judge(monkeypatch, []) as (judge, _):
         verdict = await _evaluate(judge)
-        assert budgets == [5, 1]
-        assert verdict.approved is False
-        assert verdict.audit["failure_reason"] == "timeout"
-        assert verdict.audit["calls"][-1]["error"] == "TimeoutError"
+        assert budgets == [5, 60]
+        late = reasoning_end >= 164.0
+        assert verdict.approved is not late
+        assert verdict.audit["failure_reason"] == ("timeout" if late else None)
+        if late:
+            assert verdict.audit["calls"][-1]["error"] == "TimeoutError"
+
+
+async def test_predicate_asset_is_loaded_once_per_judge(monkeypatch):
+    load = create_autospec(judge_module.load_default_asset, wraps=judge_module.load_default_asset)
+    load.return_value = load_default_asset()
+    monkeypatch.setattr(judge_module, "load_default_asset", load)
+    async with _judge(monkeypatch, [json.dumps(_values()), json.dumps(_values())]) as (judge, calls):
+        assert (await _evaluate(judge)).approved is True
+        assert (await _evaluate(judge)).approved is True
+        assert len(calls) == 2
+        load.assert_called_once_with()
 
 
 async def test_concurrent_requests_keep_context_and_audits_separate(monkeypatch, tmp_path):

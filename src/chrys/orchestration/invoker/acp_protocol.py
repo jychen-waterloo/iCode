@@ -73,7 +73,7 @@ from chrys.service.trajectory.waits import WaitOutcome, WaitTrace
 
 if TYPE_CHECKING:
     from chrys.foundation.events.bus import EventBus
-    from chrys.service.approval.judge import ApprovalJudge
+    from chrys.service.approval.judge import ApprovalJudge, JudgeVerdict
     from chrys.service.approval.turn_context import TurnContextReader
 
 logger = logging.getLogger(__name__)
@@ -826,8 +826,15 @@ class AcpPermissionBroker:
             context=self._trajectory_context,
             target_operation_id=self._trajectory_boundary_operation_id,
         )
+        judge_audit: Mapping[str, Any] | None = None
         async with OneShotCorrelation(self._bus, ApprovalResponse) as correlation:
             request_id = correlation.request_id
+
+            def record_verdict(verdict: JudgeVerdict) -> None:
+                nonlocal judge_audit
+                judge_audit = verdict.audit
+                self._record_judge_audit(request_id, judge_audit)
+
             future = correlation.future
             self._permission_waits[request_id] = future
             judging = mode.uses_judge and self._judge is not None
@@ -893,7 +900,6 @@ class AcpPermissionBroker:
                                 args=raw_args,
                                 user_message=self._turn_context.user_message,
                                 user_messages=self._turn_context.user_messages,
-                                compact_context=self._turn_context.compact_context,
                                 workspace_roots=list(self._workspace_roots),
                             ),
                             decision_future=future,
@@ -903,7 +909,7 @@ class AcpPermissionBroker:
                                 session_id=self._session_id,
                             ),
                             log_dir=None,
-                            on_verdict=lambda verdict: self._record_judge_audit(request_id, verdict.audit),
+                            on_verdict=record_verdict,
                             formal=mode is ApprovalMode.AUTO_FORMAL,
                         ),
                     )
@@ -946,6 +952,7 @@ class AcpPermissionBroker:
                     decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE,
                     reason_code="approved",
                     arguments_modified=False,
+                    judge_audit=judge_audit,
                 )
             return PermissionDecision.allow(allow.option_id)
         if approval_trace is not None:
@@ -954,6 +961,7 @@ class AcpPermissionBroker:
                 decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE,
                 reason_code="rejected",
                 arguments_modified=False,
+                judge_audit=judge_audit,
             )
         return PermissionDecision.deny(reject.option_id) if reject is not None else PermissionDecision.cancelled()
 

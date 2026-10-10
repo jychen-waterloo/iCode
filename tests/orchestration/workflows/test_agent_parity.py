@@ -23,9 +23,7 @@ from chrys.foundation.events.types import (
     InvocationToolCallStart,
     SetApprovalMode,
 )
-from chrys.foundation.models.history_markers import HistoryMarkerKind
 from chrys.foundation.tool_result_metadata import TOOL_RESULT_METADATA_KEY
-from chrys.kernel import AgentSession, Message
 from chrys.orchestration.invoker.resources import Conversation
 from chrys.orchestration.invoker.runtime import ApprovalInputs
 from chrys.orchestration.workflows.agent_node_build import KernelNodeParts
@@ -54,18 +52,6 @@ from tests.orchestration.workflows._hosting import (
 )
 from tests.support.event_capture import capture_events
 from tests.support.scripted_clients import ErrorMockChatClient, FrameworkBoom
-
-
-def test_node_compact_context_follows_replaced_session_state() -> None:
-    session = AgentSession()
-    assert agent_node_build_module._session_compact_context(session) == ""
-    summary = Message("assistant", ["Current node summary"])
-    summary.additional_properties[HistoryMarkerKind.KEY] = HistoryMarkerKind.SUMMARY
-    session.state = {"chrys_history": {"messages": [summary]}}
-    assert agent_node_build_module._session_compact_context(session) == "Current node summary"
-    session.state = {}
-    assert agent_node_build_module._session_compact_context(session) == ""
-
 
 _WORKFLOW = (
     "from chrys.workflows import WorkflowBuilder\nwf = WorkflowBuilder('agent')\n"

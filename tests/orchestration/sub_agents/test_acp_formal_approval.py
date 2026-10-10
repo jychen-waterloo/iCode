@@ -13,19 +13,80 @@ from acp.schema import PermissionOption, ToolCallUpdate
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.events.types import ApprovalRequest, ApprovalResponse, ApprovalReviewed
 from chrys.foundation.models.invocations import InvocationOrigin
+from chrys.foundation.trajectory.event_types import EventType
+from chrys.foundation.trajectory.ids import new_analytics_id
 from chrys.orchestration.invoker.acp_protocol import AcpPermissionBroker, AcpUpdateTranslator
 from chrys.service.approval.judge import ApprovalJudge
 from chrys.service.approval.policy import ApprovalMode
 from chrys.service.approval.turn_context import TurnContextHolder
 from chrys.service.profiles.models.schema import ModelProfile
+from tests.service.approval import test_formal_jev_core as core
+from tests.service.trajectory._fakes import FakeSink, make_context
 from tests.support.event_capture import capture_event_sequence
 from tests.support.waiting import wait_for
 
 
+@pytest.mark.parametrize("kind", [None, "other"], ids=["missing-kind", "unmapped-kind"])
+@pytest.mark.parametrize("triggered", [False, True])
+@pytest.mark.parametrize("human_approved", [False, True])
+async def test_missing_acp_kind_is_reviewed_by_the_predicate_model(monkeypatch, kind, triggered, human_approved):
+    bus = EventBus()
+    sink = FakeSink()
+    context = TurnContextHolder()
+    context.replace(["Inspect source"])
+    values = core._values() | {"external_action": triggered}
+    async with core._judge(monkeypatch, [core._reply(values, "test")]) as (judge, calls):
+        broker = AcpPermissionBroker(
+            event_bus=bus,
+            session_id="parent",
+            caller_name="External",
+            mode_getter=lambda: ApprovalMode.AUTO_FORMAL,
+            turn_context=context,
+            workspace_roots=["/workspace"],
+            workspace_cwd="/workspace",
+            approval_judge=judge,
+            ask_user_timeout_seconds=None,
+            trajectory_context=make_context(sink),
+            trajectory_boundary_operation_id=new_analytics_id(),
+        )
+
+        async def human_decline(event: ApprovalReviewed):
+            if triggered:
+                assert event.approved is False
+                assert "external_action" in event.reason
+                await bus.publish(
+                    ApprovalResponse(request_id=event.request_id, approved=human_approved, session_id="parent")
+                )
+
+        await bus.subscribe(ApprovalReviewed, human_decline)
+        try:
+            decision = await asyncio.wait_for(
+                broker.on_permission_request(
+                    ToolCallUpdate(toolCallId="call", title="Inspect source", kind=kind, rawInput={"path": "main.py"}),
+                    [
+                        PermissionOption(optionId="allow", name="Allow", kind="allow_once"),
+                        PermissionOption(optionId="reject", name="Reject", kind="reject_once"),
+                    ],
+                ),
+                timeout=5,
+            )
+            assert len(calls) == 1
+            assert decision.action == ("deny" if triggered and not human_approved else "allow")
+            resolved = sink.only(EventType.APPROVAL_RESOLVED).payload
+            assert resolved["decider"] == ("user" if triggered else "judge")
+            assert resolved["formal_judge"]["approved"] is (not triggered)
+            assert resolved["formal_judge"]["predicate_results"] == [
+                {"id": key, "value": value} for key, value in values.items()
+            ]
+        finally:
+            await broker.close()
+            await bus.unsubscribe(ApprovalReviewed, human_decline)
+
+
 @pytest.mark.parametrize(
     "kind,messages",
-    [(None, ["Inspect source"]), ("other", ["Inspect source"]), ("read", [])],
-    ids=["missing-kind", "unmapped-kind", "missing-user-context"],
+    [(None, []), ("other", []), ("read", [])],
+    ids=["missing-kind-and-context", "unmapped-kind-and-context", "missing-user-context"],
 )
 async def test_invalid_formal_context_waits_for_human_allow(monkeypatch, kind, messages):
     bus = EventBus()

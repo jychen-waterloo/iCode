@@ -1839,8 +1839,8 @@
         ["future", "await future", "unresolved"],
         ["awaitable", "await self._bus.publish(ApprovalCancelled(request_id=request_id, session_id=self._session_id))", "unresolved"],
         ["future", "await judge_task", "unresolved"],
-        ["awaitable", "await approval_trace.resolved(approved=True, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='approved', arguments_modified=False)", "unresolved"],
-        ["awaitable", "await approval_trace.resolved(approved=False, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='rejected', arguments_modified=False)", "unresolved"]
+        ["awaitable", "await approval_trace.resolved(approved=True, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='approved', arguments_modified=False, judge_audit=judge_audit)", "unresolved"],
+        ["awaitable", "await approval_trace.resolved(approved=False, decider=ApprovalDecider.USER if correlation.resolved_by_event else ApprovalDecider.JUDGE, reason_code='rejected', arguments_modified=False, judge_audit=judge_audit)", "unresolved"]
       ],
       "AcpPermissionBroker._publish_initial_dialog_cleanup": [
         ["wrapper", "await drain_acp_task(task)", "unresolved", "chrys.orchestration.invoker.acp_protocol.drain_acp_task"]
@@ -3694,7 +3694,7 @@
         ["awaitable", "await self._bus.subscribe(ApprovalAutoFulfillBlocked, self._on_blocked)", "unresolved"]
       ],
       "ApprovalDecisionArbiter.judge": [
-        ["awaitable", "await judge.evaluate(user_message=judge_input.user_message, user_messages=list(judge_input.user_messages), tool_name=judge_input.tool_name, tool_kind=judge_input.tool_kind, args=judge_input.args, workspace_roots=list(judge_input.workspace_roots), request_id=request_id, log_dir=log_dir, formal=formal, compact_context=judge_input.compact_context)", "unresolved"],
+        ["awaitable", "await judge.evaluate(user_message=judge_input.user_message, user_messages=list(judge_input.user_messages), tool_name=judge_input.tool_name, tool_kind=judge_input.tool_kind, args=judge_input.args, workspace_roots=list(judge_input.workspace_roots), request_id=request_id, log_dir=log_dir, formal=formal)", "unresolved"],
         ["awaitable", "await self._bus.publish(ApprovalReviewed(request_id=request_id, approved=verdict.approved, reason=verdict.reason, session_id=self._session_id))", "unresolved"]
       ]
     },
@@ -3737,10 +3737,10 @@
         ["awaitable", "await self._close()", "unresolved"]
       ],
       "ApprovalJudge.evaluate": [
-        ["awaitable", "await self._reasoning_judge.evaluate(user_message, tool_name, tool_kind, args, workspace_roots, request_id, log_dir, user_messages, compact_context=compact_context)", "unresolved"],
-        ["wrapper", "await self._evaluate_direct(user_message=user_message, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, request_id=request_id, log_dir=log_dir, user_messages=user_messages, compact_context=compact_context)", "unresolved", "chrys.service.approval.judge.ApprovalJudge._evaluate_direct"],
-        ["timeout", "await asyncio.wait_for(self._evaluate_predicates(asset=asset, user_message=user_message, user_messages=user_messages, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, audit=audit, compact_context=compact_context), timeout=remaining)", "unresolved"],
-        ["timeout", "await asyncio.wait_for(self._reasoning_judge._evaluate_direct(user_message=user_message, user_messages=user_messages, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, request_id=request_id, log_dir=log_dir, audit=audit, compact_context=compact_context), timeout=remaining)", "unresolved"]
+        ["awaitable", "await self._reasoning_judge.evaluate(user_message, tool_name, tool_kind, args, workspace_roots, request_id, log_dir, user_messages)", "unresolved"],
+        ["wrapper", "await self._evaluate_direct(user_message=user_message, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, request_id=request_id, log_dir=log_dir, user_messages=user_messages)", "unresolved", "chrys.service.approval.judge.ApprovalJudge._evaluate_direct"],
+        ["timeout", "await asyncio.wait_for(self._evaluate_predicates(asset=asset, user_message=user_message, user_messages=user_messages, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, audit=audit), timeout=remaining)", "unresolved"],
+        ["timeout", "await asyncio.wait_for(self._reasoning_judge._evaluate_direct(user_message=user_message, user_messages=user_messages, tool_name=tool_name, tool_kind=tool_kind, args=args, workspace_roots=workspace_roots, request_id=request_id, log_dir=log_dir, audit=audit), timeout=reasoning_timeout)", "unresolved"]
       ]
     },
     "chrys.service.context.compaction.breaker": {

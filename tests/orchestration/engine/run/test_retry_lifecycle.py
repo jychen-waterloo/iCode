@@ -189,10 +189,6 @@ class _History:
         self._input_history = SessionHistoryManager()
         self._input_history.bind({"messages": messages})
 
-    @property
-    def user_prompts(self) -> list[str]:
-        return self._input_history.user_prompts
-
     def ensure_user_message(
         self,
         text: str,
@@ -535,7 +531,7 @@ class TestRetryLifecycleApprovalContext:
         assert tracker.take_pending_notice() is None
 
     async def test_approval_context_skips_nudges_keeps_injections(self) -> None:
-        """The session approval context excludes synthetic
+        """§2.2: the current-turn approval context excludes synthetic
         ``continue`` nudges (orchestration placeholders, not user input) while
         keeping user-authored injections."""
         marker = Message("assistant", [""])
@@ -558,7 +554,7 @@ class TestRetryLifecycleApprovalContext:
 
         await retry_and_save(host)
 
-        assert host.current.loaded.bindings.user_messages == ["old request", "current request", "also check the docs"]
+        assert host.current.loaded.bindings.user_messages == ["current request", "also check the docs"]
 
     async def test_synthetic_only_region_falls_back_to_previous_real_opener(self) -> None:
         """§2.2: when the current region holds only a flagged nudge, the

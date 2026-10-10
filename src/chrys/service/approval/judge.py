@@ -168,16 +168,12 @@ def _current_time_context() -> str:
     )
 
 
-def _format_user_messages(
-    user_message: str, user_messages: list[str] | None, compact_context: str = ""
-) -> tuple[str, str]:
-    """Return formatted session user messages and latest prompt text."""
+def _format_user_messages(user_message: str, user_messages: list[str] | None) -> tuple[str, str]:
+    """Return formatted current-turn messages and latest prompt text."""
     messages = [message.strip() for message in (user_messages or []) if message.strip()]
     latest = user_message.strip() or (messages[-1] if messages else "")
     if latest and (not messages or messages[-1] != latest):
         messages.append(latest)
-    if compact_context:
-        messages = messages[-8:]
     if not messages:
         return "(no user message available)", "(no user message available)"
 
@@ -194,20 +190,16 @@ def _build_user_prompt(
     args: dict[str, Any],
     workspace_roots: list[str],
     user_messages: list[str] | None = None,
-    compact_context: str = "",
 ) -> str:
     """Build the user-turn prompt for the judge LLM call."""
     workspace = ", ".join(workspace_roots) if workspace_roots else "(not specified)"
-    compact_context = compact_context.strip()
-    user_ctx, latest_user_ctx = _format_user_messages(user_message, user_messages, compact_context)
+    user_ctx, latest_user_ctx = _format_user_messages(user_message, user_messages)
     formatted_args = model_json(args, default=str, indent=2)
-    compact_block = f"<compact_context>\n{compact_context}\n</compact_context>\n\n" if compact_context else ""
 
     return (
         f"{_current_time_context()}\n\n"
         f"Workspace directories: {workspace}\n\n"
-        f"{compact_block}"
-        f"Session user prompts:\n{user_ctx}\n\n"
+        f"Current-turn user prompts:\n{user_ctx}\n\n"
         f"Latest user prompt:\n{latest_user_ctx}\n\n"
         f"Proposed action:\n"
         f"Tool: {tool_name} (kind: {tool_kind})\n"
@@ -588,7 +580,6 @@ class ApprovalJudge:
         log_dir: Path | None = None,
         user_messages: list[str] | None = None,
         formal: bool = False,
-        compact_context: str = "",
     ) -> JudgeVerdict:
         """Route Formal predicates to approval, human review, or the Direct judge."""
         task = asyncio.current_task()
@@ -605,7 +596,6 @@ class ApprovalJudge:
                     request_id,
                     log_dir,
                     user_messages,
-                    compact_context=compact_context,
                 )
             return await self._evaluate_direct(
                 user_message=user_message,
@@ -616,7 +606,6 @@ class ApprovalJudge:
                 request_id=request_id,
                 log_dir=log_dir,
                 user_messages=user_messages,
-                compact_context=compact_context,
             )
         audit = _FormalAuditState(request_id=request_id, log_dir=log_dir, deadline=time.monotonic())
         valid_request = _valid_request(
@@ -644,7 +633,9 @@ class ApprovalJudge:
             )
         audit.deadline = started_at + total_timeout
         try:
-            asset = self._predicate_asset if self._predicate_asset is not None else load_default_asset()
+            if self._predicate_asset is None:
+                self._predicate_asset = load_default_asset()
+            asset = self._predicate_asset
         except OSError, PredicateAssetError:
             audit.failure_reason = "asset_unavailable"
             return self._finalize_formal_verdict(
@@ -668,7 +659,6 @@ class ApprovalJudge:
                     args=args,
                     workspace_roots=workspace_roots,
                     audit=audit,
-                    compact_context=compact_context,
                 ),
                 timeout=remaining,
             )
@@ -685,6 +675,10 @@ class ApprovalJudge:
                 return self._finalize_formal_verdict(
                     log_dir, audit, approved=False, reason="Approval judge requires an ordinary reasoning model profile"
                 )
+            reasoning_timeout = self._reasoning_judge.profile.http_read_timeout
+            if reasoning_timeout is None or reasoning_timeout <= 0:
+                raise TimeoutError
+            audit.deadline = time.monotonic() + reasoning_timeout
             audit.stages.append("reasoning")
             verdict = await asyncio.wait_for(
                 self._reasoning_judge._evaluate_direct(
@@ -697,9 +691,8 @@ class ApprovalJudge:
                     request_id=request_id,
                     log_dir=log_dir,
                     audit=audit,
-                    compact_context=compact_context,
                 ),
-                timeout=remaining,
+                timeout=reasoning_timeout,
             )
             if time.monotonic() >= audit.deadline:
                 raise TimeoutError
@@ -729,15 +722,12 @@ class ApprovalJudge:
         args: dict[str, Any],
         workspace_roots: list[str],
         audit: _FormalAuditState | None = None,
-        compact_context: str = "",
     ) -> PredicateEvaluation:
         """Retry invalid predicate JSON with the same conversation repair flow as Direct."""
         client = await self._get_client()
         if is_jev_profile(self._profile):
             client = JevPredicateClient(client.sdk_client, self._profile.model_id, asset)
-        user_prompt = _build_user_prompt(
-            user_message, tool_name, tool_kind, args, workspace_roots, user_messages, compact_context
-        )
+        user_prompt = _build_user_prompt(user_message, tool_name, tool_kind, args, workspace_roots, user_messages)
         messages: list[Message] = [
             Message("system", [_build_predicate_system_prompt(asset)]),
             Message("user", [user_prompt]),
@@ -783,7 +773,6 @@ class ApprovalJudge:
         log_dir: Path | None = None,
         user_messages: list[str] | None = None,
         audit: _FormalAuditState | None = None,
-        compact_context: str = "",
     ) -> JudgeVerdict:
         """Evaluate a tool call for safety and relevance.
 
@@ -795,9 +784,7 @@ class ApprovalJudge:
         appended to ``{log_dir}/{request_id}.jsonl``.
         """
         client = await self._get_client()
-        user_prompt = _build_user_prompt(
-            user_message, tool_name, tool_kind, args, workspace_roots, user_messages, compact_context
-        )
+        user_prompt = _build_user_prompt(user_message, tool_name, tool_kind, args, workspace_roots, user_messages)
 
         messages: list[Message] = [
             Message("system", [_SYSTEM_PROMPT]),
@@ -1029,4 +1016,4 @@ def _valid_request(
     workspace_roots: list[str],
 ) -> bool:
     """Check required online fields; typed inputs are owned by the host."""
-    return not (not tool_name.strip() or not tool_kind.strip() or not (user_message.strip() or user_messages))
+    return not (not tool_name.strip() or not (user_message.strip() or user_messages))

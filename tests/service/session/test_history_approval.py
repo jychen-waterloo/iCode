@@ -7,53 +7,8 @@ from __future__ import annotations
 from chrys.foundation.models.history_markers import HistoryMarkerKind
 from chrys.foundation.tool_invocation_order import TOOL_INVOCATION_ORDER_KEY
 from chrys.foundation.tool_result_metadata import TOOL_ERROR_KIND_METADATA_KEY
-from chrys.foundation.trajectory.metadata import ensure_analytics_item_id
 from chrys.kernel import Content, Message
-from chrys.service.context.providers.history import CompressedBlock
 from chrys.service.session.history import SessionHistoryManager
-
-
-def test_user_prompts_include_compressed_history_and_preserve_distinct_equal_texts() -> None:
-    opener = Message("user", ["first request"])
-    ensure_analytics_item_id(opener.additional_properties)
-    injected = Message("user", ["clarification"])
-    injected.additional_properties[HistoryMarkerKind.INJECTED_KEY] = True
-    nudge = Message("user", ["continue"])
-    nudge.additional_properties[HistoryMarkerKind.CONTINUATION_KEY] = True
-    history = SessionHistoryManager()
-    history.bind(
-        {
-            "compressed_msgs": [
-                CompressedBlock("first", messages=[opener, Message("assistant", ["done"])]),
-                {"messages": [injected.to_dict(), nudge.to_dict()]},
-            ],
-            "messages": [opener, Message("tool", ["output"]), Message("user", ["first request"])],
-        }
-    )
-    assert history.user_prompts == ["first request", "clarification", "first request"]
-
-
-def test_user_prompts_follow_the_bound_session_not_the_previous_session() -> None:
-    history = SessionHistoryManager()
-    history.bind({"messages": [Message("user", ["old session"])]})
-    assert history.user_prompts == ["old session"]
-    history.bind({"messages": [Message("user", ["new session"])]})
-    assert history.user_prompts == ["new session"]
-
-
-def test_compact_context_uses_only_active_summaries_and_follows_compaction() -> None:
-    history = SessionHistoryManager()
-    state = {"messages": [Message("user", ["initial request"])]}
-    history.bind(state)
-    assert history.compact_context == ""
-    first = CompressedBlock("first", summary_text="First summary")
-    second = CompressedBlock("second", summary_text="Updated summary")
-    summary = Message("assistant", ["summary wrapper"])
-    summary.additional_properties.update({HistoryMarkerKind.KEY: HistoryMarkerKind.SUMMARY, "_block_id": "second"})
-    state.update(compressed_msgs=[first, second], messages=[summary, Message("user", ["latest request"])])
-    assert history.compact_context == "Updated summary"
-    history.bind({"messages": []})
-    assert history.compact_context == ""
 
 
 def test_persist_approval_decisions_preserves_reason() -> None:

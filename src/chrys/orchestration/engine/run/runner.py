@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from chrys.foundation.models.history_markers import HistoryMarkerKind
+from chrys.foundation.models.turns import current_turn_start, is_continuation_message
 from chrys.foundation.trajectory.ids import new_analytics_id
 from chrys.orchestration.engine import trajectory as trajectory_recorder
 from chrys.orchestration.engine.rollback import capture_snapshot_writer
@@ -140,7 +141,7 @@ class TurnRunner:
                     self._current.require_loaded().reminder_middleware.prepare_turn(
                         usage=self._session.runtime_meta.last_usage_details or None
                     )
-            self._current.require_loaded().bindings.approval.set_user_messages(self._approval_context_messages(text))
+            self._current.require_loaded().bindings.approval.set_user_messages([text] if text else [])
             self._turn_state.set_current_input(text, contents, created_at)
             if preamble is not None:
                 await preamble.finished(outcome=PreparationOutcome.HANDOFF)
@@ -250,9 +251,9 @@ class TurnRunner:
                         preserve_last_words=True,
                         preserve_turn_reminders=True,
                     )
-            self._current.require_loaded().bindings.approval.set_user_messages(
-                self._approval_context_messages(additional_text)
-            )
+            approval_context = self._retry_approval_context_messages(additional_text)
+            if approval_context:
+                self._current.require_loaded().bindings.approval.set_user_messages(approval_context)
             if additional_text:
                 # Retry guidance is user-authored MID-TURN input: a recovery
                 # checkpoint must re-create it flagged (kind-aware), or a crash
@@ -518,13 +519,50 @@ class TurnRunner:
         """Refresh runtime skills and optionally update the active reminder snapshot."""
         await self._skills.refresh(update_active_turn=update_active_turn)
 
-    def _approval_context_messages(self, additional_text: str) -> list[str]:
-        """Include session history and the input not yet committed to history."""
-        messages = self._history.user_prompts
+    def _retry_approval_context_messages(self, additional_text: str) -> list[str]:
+        """Return current-turn user texts approval should see during a retry."""
+        messages = self._current_turn_user_messages()
         stripped = additional_text.strip()
         if stripped:
             messages.append(stripped)
+        if messages:
+            return messages
+        latest = self._latest_user_message()
+        return [latest] if latest else []
+
+    def _current_turn_user_messages(self) -> list[str]:
+        """Return user messages after the last turn marker.
+
+        Feeds the approval-judge context: synthetic ``continue`` nudges are
+        skipped — they are orchestration placeholders, not user input, and must
+        not be presented to the judge as such.  Injections and guidance
+        stay: they ARE user input.
+        """
+        history_messages = self._history.messages
+        start = current_turn_start(history_messages)
+
+        messages: list[str] = []
+        for message in history_messages[start:]:
+            if message.role == "user" and not is_continuation_message(message):
+                text = (message.text or "").strip()
+                if text:
+                    messages.append(text)
         return messages
+
+    def _latest_user_message(self) -> str:
+        """Return the latest REAL user message in the full history.
+
+        Fallback leg of the approval-judge context: skips synthetic
+        ``continue`` nudges so a synthetic-only current region surfaces the
+        last real user message (typically the interrupted turn's opener)
+        instead of a fabricated ``continue`` request.
+        """
+        for message in reversed(self._history.messages):
+            if message.role == "user" and not is_continuation_message(message):
+                text = (message.text or "").strip()
+                if text:
+                    return text
+        return ""
 
     def _tag_consumed_profile_switch(self) -> None:
         """Tag the last user message when the reminder middleware consumed a profile switch."""
