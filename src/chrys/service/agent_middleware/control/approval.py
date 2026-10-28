@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -70,6 +71,7 @@ _REMEMBER_FAILED = msg(
 )
 
 _GITDIR_POINTER_PREFIX = "gitdir:"
+_prejudge_logger = logging.getLogger(__name__ + ".prejudge")
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -365,9 +367,25 @@ class ApprovalMiddleware(FunctionMiddleware):
             if isinstance(cmd, str) and cmd:
                 # The platform-selected shell is trusted, not the model's claim.
                 shell_kind = get_platform().shell.name
-                pre_route = route(cmd, shell_kind, self._prejudge)
                 if self._prejudge.mode == "shadow":
+                    try:
+                        observed = route(cmd, shell_kind, self._prejudge)
+                        _prejudge_logger.info(
+                            "shadow route=%s reason=%s policy=%s digest=%s rules=%s",
+                            observed.route, observed.reason_code, observed.policy_id,
+                            observed.analysis_digest, observed.matched_rule_ids,
+                        )
+                    except Exception:
+                        # Observation must not change the legacy decision.
+                        _prejudge_logger.exception("shadow pre-judge evaluation failed")
                     pre_route = None
+                else:
+                    pre_route = route(cmd, shell_kind, self._prejudge)
+                    _prejudge_logger.info(
+                        "enforce route=%s reason=%s policy=%s digest=%s rules=%s",
+                        pre_route.route, pre_route.reason_code, pre_route.policy_id,
+                        pre_route.analysis_digest, pre_route.matched_rule_ids,
+                    )
                 elif pre_route.route is Route.BLOCK:
                     context.metadata[_APPROVAL_REJECTED_KEY] = True
                     context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
