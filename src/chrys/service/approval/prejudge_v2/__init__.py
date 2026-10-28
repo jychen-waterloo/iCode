@@ -207,9 +207,9 @@ def load_policy(path: Path) -> Policy:
             raise ValueError("Invalid pre-judge effect or target")
         if not isinstance(when, str) or not when or len(when) > 4096:
             raise ValueError("Invalid CEL expression")
-        expression = env.compile(when)
-        # Typecheck must be carried out by the chosen CEL backend; reject
-        # invalid expressions during initialization, not during execution.
+        expression = env.compile(f"({when}) && true")
+        # The trailing boolean conjunction forces CEL to statically check
+        # the policy's when expression as a boolean at load time.
         seen.add(rid)
         rules.append(Rule(rid, Route(effect), expression))
     return Policy(mode, ident, tuple(rules))
@@ -235,7 +235,7 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
                     "argv": list(node.argv or ()),
                     "prefix": list(node.prefix),
                 })
-                match = verdict.type() == "BOOL" and verdict.value() is True
+                match = verdict.value() is True
             except Exception:
                 match = False
             if match:
