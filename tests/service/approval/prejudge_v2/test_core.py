@@ -74,3 +74,27 @@ def test_invalid_config(tmp_path, config):
     file.write_text(config, encoding="utf-8")
     with pytest.raises(ValueError):
         pj.load_policy(file)
+
+def test_invalid_shadow_policy_disables_observation(tmp_path, monkeypatch):
+    file = tmp_path / "prejudge.yaml"
+    file.write_text(
+        'schema_version: 1\nmode: "shadow"\npolicy_id: pilot\nrules: []',
+        encoding="utf-8",
+    )
+    def bad_parser():
+        raise RuntimeError("tree-sitter not installed")
+    monkeypatch.setattr(pj, "_ensure_bash_parser", bad_parser)
+    assert pj.load_policy(file).mode == "off"
+
+
+def test_enforce_requires_parser_at_load(tmp_path, monkeypatch):
+    file = tmp_path / "prejudge.yaml"
+    file.write_text(
+        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\nrules: []',
+        encoding="utf-8",
+    )
+    def bad_parser():
+        raise RuntimeError("tree-sitter not installed")
+    monkeypatch.setattr(pj, "_ensure_bash_parser", bad_parser)
+    with pytest.raises(RuntimeError, match="tree-sitter"):
+        pj.load_policy(file)
