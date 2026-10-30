@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from chrys.foundation.events.types import (
 )
 from chrys.foundation.i18n import msg
 from chrys.foundation.models.invocations import InvocationOrigin
+from chrys.foundation.platform import get_platform
 from chrys.foundation.platform.paths import resolve_workspace_path
 from chrys.foundation.tool_kinds import (
     KIND_FILESYSTEM_READ,
@@ -51,6 +53,7 @@ from chrys.service.agent_middleware.events.hook_dispatch import (
 from chrys.service.approval.arbitration import ApprovalDecisionArbiter, ApprovalJudgeInput
 from chrys.service.approval.correlation import OneShotCorrelation
 from chrys.service.approval.policy import ApprovalMode
+from chrys.service.approval.prejudge_v2 import Route, load_policy, route
 from chrys.service.approval.reuse_binding import ApprovalReuseBinding, PreparedReuse
 from chrys.service.approval.safety_classifier import (
     path_arg_may_access_sensitive_data,
@@ -68,6 +71,7 @@ _REMEMBER_FAILED = msg(
 )
 
 _GITDIR_POINTER_PREFIX = "gitdir:"
+_prejudge_logger = logging.getLogger(__name__ + ".prejudge")
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -247,6 +251,8 @@ class ApprovalMiddleware(FunctionMiddleware):
     ) -> None:
         from chrys.service.approval.turn_context import TurnContextHolder
 
+        # Fixed trusted user-level policy snapshot; an off or missing policy is inert.
+        self._prejudge = load_policy(get_platform().config_dir / "prejudge.yaml")
         self._policy = approval_policy
         self._reuse = reuse
         self._publisher: InvocationPublisher | None = None
@@ -350,6 +356,53 @@ class ApprovalMiddleware(FunctionMiddleware):
             context.arguments
         )
         policy_requires_approval = self._policy.should_require_approval(tool_name, tool_kind)
+        pre_route = None
+        prejudge_scoped = (
+            tool_kind == KIND_SHELL
+            and self._prejudge.mode != "off"
+            and self._approval_mode != ApprovalMode.BYPASS
+        )
+        if prejudge_scoped:
+            raw = context.arguments
+            cmd = raw.get("command", "") if isinstance(raw, dict) else ""
+            if isinstance(cmd, str) and cmd:
+                # ShellTools assigns the actual launched shell's name to its
+                # FunctionTool, including a deliberately selected Git Bash.
+                # The user's $SHELL is not necessarily the executed dialect.
+                if self._prejudge.mode == "shadow":
+                    try:
+                        observed = route(cmd, tool_name, self._prejudge)
+                        _prejudge_logger.info(
+                            "shadow route=%s reason=%s policy=%s digest=%s rules=%s",
+                            observed.route, observed.reason_code, observed.policy_id,
+                            observed.analysis_digest, observed.matched_rule_ids,
+                        )
+                    except Exception:
+                        _prejudge_logger.exception("shadow pre-judge evaluation failed")
+                else:
+                    try:
+                        pre_route = route(cmd, tool_name, self._prejudge)
+                    except Exception:
+                        # A runtime failure is UNKNOWN, never a successful
+                        # allow. Invalid/missing configured dependencies are
+                        # rejected at policy initialization, not here.
+                        _prejudge_logger.exception("enforce pre-judge evaluation failed; deferring")
+                    if pre_route is not None:
+                        _prejudge_logger.info(
+                            "enforce route=%s reason=%s policy=%s digest=%s rules=%s",
+                            pre_route.route, pre_route.reason_code, pre_route.policy_id,
+                            pre_route.analysis_digest, pre_route.matched_rule_ids,
+                        )
+                        if pre_route.route is Route.BLOCK:
+                            context.metadata[_APPROVAL_REJECTED_KEY] = True
+                            context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
+                            context.metadata[_REJECTION_MESSAGE_KEY] = "Command blocked by structured pre-judge."
+                            context.result = "Error: Command blocked by structured pre-judge."
+                            self._decisions.append(_decision(
+                                request_id="", tool_name=tool_name, status="prejudge_blocked",
+                                call_id=call_id, tool_order=tool_order,
+                            ))
+                            return
         if (
             not policy_requires_approval
             and not dev_sub_agent_review
@@ -360,9 +413,29 @@ class ApprovalMiddleware(FunctionMiddleware):
             await call_next()
             return
 
+        # The new ALLOW shortcut takes the place of the legacy readonly
+        # shortcut, *after* ordinary policy/mandatory context checks, never
+        # before the initial BLOCK evaluation.
+        if (
+            pre_route is not None
+            and pre_route.route is Route.ALLOW
+            and not dev_sub_agent_review
+            and not sensitive_shell
+            and isinstance(context.arguments, dict)
+            and not shell_command_may_access_sensitive_data(
+                context.arguments.get("command", ""), shell_name=tool_name,
+            )
+        ):
+            self._decisions.append(_decision(
+                request_id="", tool_name=tool_name, status="prejudge_approved",
+                call_id=call_id, tool_order=tool_order,
+            ))
+            await call_next()
+            return
+
         # Auto-approve safe read-only shell commands (e.g. ls, cat, grep)
         # without showing the approval dialog.
-        if tool_kind == KIND_SHELL:
+        if tool_kind == KIND_SHELL and not (prejudge_scoped and self._prejudge.mode == "enforce"):
             raw = context.arguments
             cmd = raw.get("command", "") if isinstance(raw, dict) else ""
             if cmd:
@@ -650,6 +723,7 @@ class ApprovalMiddleware(FunctionMiddleware):
             targets = reuse.targets if reuse is not None else None
             if modified_args:
                 context.arguments = {**parsed_args, **modified_args}
+                approved_edit_snapshot = json.dumps(context.arguments, sort_keys=True, default=str)
                 # Re-dispatch ``before_tool_call`` hooks with the edited args.
                 # ``ToolEventMiddleware`` already fired hooks once with the
                 # original args before approval ran; without this second pass,
@@ -671,8 +745,23 @@ class ApprovalMiddleware(FunctionMiddleware):
                     target_operation_id=tool_operation_id(context.metadata),
                     origin=publisher.origin if publisher is not None else None,
                 )
-                # Hooks may have rewritten args further — capture the final form.
+                # A post-confirmation Hook mutation invalidates the human's
+                # argument approval. Reject *before* recording/publishing the
+                # updated arguments, and correct the decision audit.
                 final_args = context.arguments if isinstance(context.arguments, dict) else modified_args
+                if (
+                    not hook_blocked
+                    and self._prejudge.mode == "enforce"
+                    and tool_kind == KIND_SHELL
+                    and json.dumps(final_args, sort_keys=True, default=str) != approved_edit_snapshot
+                ):
+                    decision["status"] = "hook_rewrite_rejected"
+                    decision.pop("modified_args", None)
+                    context.metadata[_APPROVAL_REJECTED_KEY] = True
+                    context.metadata[_REJECTION_SOURCE_KEY] = "approval_invalidated"
+                    context.metadata[_REJECTION_MESSAGE_KEY] = "Tool arguments changed after approval."
+                    context.result = "Error: Tool arguments changed after approval; submit a new approval request."
+                    return
                 context.metadata[_APPROVAL_MODIFIED_ARGS_KEY] = final_args
                 if call_id and isinstance(final_args, dict):
                     if publisher is None:
@@ -693,9 +782,8 @@ class ApprovalMiddleware(FunctionMiddleware):
                 except TypeError:
                     decision["modified_args"] = json.dumps(modified_args, ensure_ascii=False, default=str)
                 if hook_blocked:
-                    # Hook intercepted the edited args. ``apply_before_tool_hooks``
-                    # already set ``context.result`` and ``_APPROVAL_REJECTED_KEY``;
-                    # skip ``call_next`` so the tool doesn't run.
+                    # Preserve the legacy UI/audit record of the edited args
+                    # even when the hook denies execution of those args.
                     return
                 if binding is not None:
                     # An edit is approved once, for where the edited call acts now.
