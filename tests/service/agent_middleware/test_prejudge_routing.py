@@ -45,7 +45,7 @@ async def test_shell_routes_do_not_bypass_or_mutate_legacy(
         bus,
         approval_mode=ApprovalMode.MANUAL,
     )
-    context = FunctionInvocationContext(tool, {"command": "git status"})
+    context = FunctionInvocationContext(tool, {"command": "ls"})
     executed = 0
     async def execute():
         nonlocal executed
