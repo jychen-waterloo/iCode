@@ -782,11 +782,6 @@ class ApprovalMiddleware(FunctionMiddleware):
                     decision["modified_args"] = json.dumps(final_args, ensure_ascii=False)
                 except TypeError:
                     decision["modified_args"] = json.dumps(modified_args, ensure_ascii=False, default=str)
-                if hook_blocked:
-                    # Hook intercepted the edited args. ``apply_before_tool_hooks``
-                    # already set ``context.result`` and ``_APPROVAL_REJECTED_KEY``;
-                    # skip ``call_next`` so the tool doesn't run.
-                    return
                 if binding is not None:
                     # An edit is approved once, for where the edited call acts now.
                     targets = await asyncio.to_thread(binding.targets, context)
