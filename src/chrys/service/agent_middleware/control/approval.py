@@ -357,56 +357,52 @@ class ApprovalMiddleware(FunctionMiddleware):
         )
         policy_requires_approval = self._policy.should_require_approval(tool_name, tool_kind)
         pre_route = None
-        if (
+        prejudge_scoped = (
             tool_kind == KIND_SHELL
             and self._prejudge.mode != "off"
             and self._approval_mode != ApprovalMode.BYPASS
-        ):
+        )
+        if prejudge_scoped:
             raw = context.arguments
             cmd = raw.get("command", "") if isinstance(raw, dict) else ""
             if isinstance(cmd, str) and cmd:
-                # The platform-selected shell is trusted, not the model's claim.
-                shell_kind = get_platform().shell.name
+                # ShellTools assigns the actual launched shell's name to its
+                # FunctionTool, including a deliberately selected Git Bash.
+                # The user's $SHELL is not necessarily the executed dialect.
                 if self._prejudge.mode == "shadow":
                     try:
-                        observed = route(cmd, shell_kind, self._prejudge)
+                        observed = route(cmd, tool_name, self._prejudge)
                         _prejudge_logger.info(
                             "shadow route=%s reason=%s policy=%s digest=%s rules=%s",
                             observed.route, observed.reason_code, observed.policy_id,
                             observed.analysis_digest, observed.matched_rule_ids,
                         )
                     except Exception:
-                        # Observation must not change the legacy decision.
                         _prejudge_logger.exception("shadow pre-judge evaluation failed")
-                    pre_route = None
                 else:
-                    pre_route = route(cmd, shell_kind, self._prejudge)
-                    _prejudge_logger.info(
-                        "enforce route=%s reason=%s policy=%s digest=%s rules=%s",
-                        pre_route.route, pre_route.reason_code, pre_route.policy_id,
-                        pre_route.analysis_digest, pre_route.matched_rule_ids,
-                    )
-                elif pre_route.route is Route.BLOCK:
-                    context.metadata[_APPROVAL_REJECTED_KEY] = True
-                    context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
-                    context.metadata[_REJECTION_MESSAGE_KEY] = "Command blocked by structured pre-judge."
-                    context.result = "Error: Command blocked by structured pre-judge."
-                    self._decisions.append(_decision(
-                        request_id="", tool_name=tool_name, status="prejudge_blocked",
-                        call_id=call_id, tool_order=tool_order,
-                    ))
-                    return
-                elif (
-                    pre_route.route is Route.ALLOW
-                    and not sensitive_shell
-                    and not shell_command_may_access_sensitive_data(cmd, shell_name=tool_name)
-                ):
-                    self._decisions.append(_decision(
-                        request_id="", tool_name=tool_name, status="prejudge_approved",
-                        call_id=call_id, tool_order=tool_order,
-                    ))
-                    await call_next()
-                    return
+                    try:
+                        pre_route = route(cmd, tool_name, self._prejudge)
+                    except Exception:
+                        # A runtime failure is UNKNOWN, never a successful
+                        # allow. Invalid/missing configured dependencies are
+                        # rejected at policy initialization, not here.
+                        _prejudge_logger.exception("enforce pre-judge evaluation failed; deferring")
+                    if pre_route is not None:
+                        _prejudge_logger.info(
+                            "enforce route=%s reason=%s policy=%s digest=%s rules=%s",
+                            pre_route.route, pre_route.reason_code, pre_route.policy_id,
+                            pre_route.analysis_digest, pre_route.matched_rule_ids,
+                        )
+                        if pre_route.route is Route.BLOCK:
+                            context.metadata[_APPROVAL_REJECTED_KEY] = True
+                            context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
+                            context.metadata[_REJECTION_MESSAGE_KEY] = "Command blocked by structured pre-judge."
+                            context.result = "Error: Command blocked by structured pre-judge."
+                            self._decisions.append(_decision(
+                                request_id="", tool_name=tool_name, status="prejudge_blocked",
+                                call_id=call_id, tool_order=tool_order,
+                            ))
+                            return
         if (
             not policy_requires_approval
             and not dev_sub_agent_review
@@ -417,9 +413,29 @@ class ApprovalMiddleware(FunctionMiddleware):
             await call_next()
             return
 
+        # The new ALLOW shortcut takes the place of the legacy readonly
+        # shortcut, *after* ordinary policy/mandatory context checks, never
+        # before the initial BLOCK evaluation.
+        if (
+            pre_route is not None
+            and pre_route.route is Route.ALLOW
+            and not dev_sub_agent_review
+            and not sensitive_shell
+            and isinstance(context.arguments, dict)
+            and not shell_command_may_access_sensitive_data(
+                context.arguments.get("command", ""), shell_name=tool_name,
+            )
+        ):
+            self._decisions.append(_decision(
+                request_id="", tool_name=tool_name, status="prejudge_approved",
+                call_id=call_id, tool_order=tool_order,
+            ))
+            await call_next()
+            return
+
         # Auto-approve safe read-only shell commands (e.g. ls, cat, grep)
         # without showing the approval dialog.
-        if tool_kind == KIND_SHELL and (self._prejudge.mode != "enforce" or pre_route is None):
+        if tool_kind == KIND_SHELL and not (prejudge_scoped and self._prejudge.mode == "enforce"):
             raw = context.arguments
             cmd = raw.get("command", "") if isinstance(raw, dict) else ""
             if cmd:
