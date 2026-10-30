@@ -745,8 +745,24 @@ class ApprovalMiddleware(FunctionMiddleware):
                     target_operation_id=tool_operation_id(context.metadata),
                     origin=publisher.origin if publisher is not None else None,
                 )
-                # Hooks may have rewritten args further — capture the final form.
+                # A post-confirmation Hook mutation invalidates the human's
+                # argument approval. Reject *before* recording/publishing the
+                # updated arguments, and correct the decision audit.
                 final_args = context.arguments if isinstance(context.arguments, dict) else modified_args
+                if hook_blocked:
+                    return
+                if (
+                    self._prejudge.mode == "enforce"
+                    and tool_kind == KIND_SHELL
+                    and json.dumps(final_args, sort_keys=True, default=str) != approved_edit_snapshot
+                ):
+                    decision["status"] = "hook_rewrite_rejected"
+                    decision.pop("modified_args", None)
+                    context.metadata[_APPROVAL_REJECTED_KEY] = True
+                    context.metadata[_REJECTION_SOURCE_KEY] = "hook"
+                    context.metadata[_REJECTION_MESSAGE_KEY] = "Tool arguments changed after approval."
+                    context.result = "Error: Tool arguments changed after approval; submit a new approval request."
+                    return
                 context.metadata[_APPROVAL_MODIFIED_ARGS_KEY] = final_args
                 if call_id and isinstance(final_args, dict):
                     if publisher is None:
@@ -770,25 +786,6 @@ class ApprovalMiddleware(FunctionMiddleware):
                     # Hook intercepted the edited args. ``apply_before_tool_hooks``
                     # already set ``context.result`` and ``_APPROVAL_REJECTED_KEY``;
                     # skip ``call_next`` so the tool doesn't run.
-                    return
-                # Approval binds to the exact post-hook arguments. Any further
-                # hook rewrite is a new action and must be independently
-                # authorized, never executed under a stale user approval.
-                if (
-                    self._prejudge.mode == "enforce"
-                    and tool_kind == KIND_SHELL
-                    and json.dumps(final_args, sort_keys=True, default=str) != approved_edit_snapshot
-                ):
-                    # An edited command subsequently rewritten by a Hook no
-                    # longer matches the human's approved argument snapshot.
-                    # Reject instead of recursively re-entering process():
-                    # the latter duplicated decision records and leaked a
-                    # private recheck counter into persisted tool metadata.
-                    # A new tool call can request a fresh approval.
-                    context.metadata[_APPROVAL_REJECTED_KEY] = True
-                    context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
-                    context.metadata[_REJECTION_MESSAGE_KEY] = "Tool arguments changed after approval."
-                    context.result = "Error: Tool arguments changed after approval; submit a new approval request."
                     return
                 if binding is not None:
                     # An edit is approved once, for where the edited call acts now.
