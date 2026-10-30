@@ -779,14 +779,16 @@ class ApprovalMiddleware(FunctionMiddleware):
                     and tool_kind == KIND_SHELL
                     and json.dumps(final_args, sort_keys=True, default=str) != approved_edit_snapshot
                 ):
-                    count = context.metadata.get("_prejudge_rechecks", 0)
-                    if count >= 1:
-                        context.metadata[_APPROVAL_REJECTED_KEY] = True
-                        context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
-                        context.result = "Error: Command changed again after re-approval."
-                        return
-                    context.metadata["_prejudge_rechecks"] = count + 1
-                    await self.process(context, call_next)
+                    # An edited command subsequently rewritten by a Hook no
+                    # longer matches the human's approved argument snapshot.
+                    # Reject instead of recursively re-entering process():
+                    # the latter duplicated decision records and leaked a
+                    # private recheck counter into persisted tool metadata.
+                    # A new tool call can request a fresh approval.
+                    context.metadata[_APPROVAL_REJECTED_KEY] = True
+                    context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
+                    context.metadata[_REJECTION_MESSAGE_KEY] = "Tool arguments changed after approval."
+                    context.result = "Error: Tool arguments changed after approval; submit a new approval request."
                     return
                 if binding is not None:
                     # An edit is approved once, for where the edited call acts now.
