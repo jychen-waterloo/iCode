@@ -98,13 +98,14 @@ def _parse_command(node: Any, data: bytes) -> CommandNode:
     head = node.child_by_field_name("name")
     if head is None:
         return CommandNode((node.start_byte, node.end_byte), None, (), text)
-    words = [head, *[child for child in node.named_children if child.field_name_for_child(
-        next((i for i, c in enumerate(node.children) if c.id == child.id), -1)
-    ) == "argument"]]
-    # Some grammar versions do not expose argument fields on named_children:
-    # use their order after the head but never admit assignments/redirects.
-    if len(words) == 1:
-        words.extend(child for child in node.named_children if child.start_byte > head.start_byte and child.type in _QUOTED)
+    words = [head]
+    # Collect only ordered literal arguments. Assignment/redirect nodes are
+    # not argv, but a reliable head can still trigger a block.
+    for child in node.named_children:
+        if child.id == head.id:
+            continue
+        if child.type in _QUOTED:
+            words.append(child)
     prefix: list[str] = []
     complete = all(child.type in _QUOTED or child.id == head.id for child in node.named_children)
     for word in words:
