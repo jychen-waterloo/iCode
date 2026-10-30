@@ -8,6 +8,8 @@ enabled policy is loaded.
 from __future__ import annotations
 
 import hashlib
+import logging
+from functools import lru_cache
 import shlex
 from dataclasses import dataclass
 from enum import StrEnum
@@ -15,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 class Route(StrEnum):
@@ -68,6 +72,7 @@ _OPAQUE = frozenset({
     "sudo", "timeout", "nice", "nohup", "bash", "sh", "dash", "find",
 })
 _DYNAMIC = frozenset({
+    "brace_expression", "glob_pattern", "extglob_pattern", "word_expansion",
     "expansion", "simple_expansion", "command_substitution",
     "process_substitution", "arithmetic_expansion", "variable_assignment",
     "heredoc_redirect", "heredoc_body", "here_string",
@@ -90,19 +95,28 @@ def _dynamic(node: Any) -> bool:
 
 def _parse_command(node: Any, data: bytes) -> CommandNode:
     text = data[node.start_byte:node.end_byte].decode("utf-8")
-    # Conservative token collection: a dynamic word terminates the reliable
-    # static prefix; it must never be reconstructed into an allowable argv.
-    words = [child for child in node.named_children if child.type in _QUOTED]
-    if not words or any(child.type not in _QUOTED for child in node.named_children):
+    head = node.child_by_field_name("name")
+    if head is None:
         return CommandNode((node.start_byte, node.end_byte), None, (), text)
+    words = [head, *[child for child in node.named_children if child.field_name_for_child(
+        next((i for i, c in enumerate(node.children) if c.id == child.id), -1)
+    ) == "argument"]]
+    # Some grammar versions do not expose argument fields on named_children:
+    # use their order after the head but never admit assignments/redirects.
+    if len(words) == 1:
+        words.extend(child for child in node.named_children if child.start_byte > head.start_byte and child.type in _QUOTED)
     prefix: list[str] = []
-    complete = True
+    complete = all(child.type in _QUOTED or child.id == head.id for child in node.named_children)
     for word in words:
         if _dynamic(word):
             complete = False
             break
+        raw = data[word.start_byte:word.end_byte].decode("utf-8")
+        if any(ch in raw for ch in "*?[") and word.type in {"word", "command_name"}:
+            complete = False
+            break
         try:
-            token = shlex.split(data[word.start_byte:word.end_byte].decode("utf-8"), posix=True)
+            token = shlex.split(raw, posix=True)
         except ValueError:
             complete = False
             break
@@ -112,24 +126,31 @@ def _parse_command(node: Any, data: bytes) -> CommandNode:
         prefix.append(token[0])
     return CommandNode(
         (node.start_byte, node.end_byte),
-        tuple(prefix) if complete else None,
-        tuple(prefix),
-        text,
+        tuple(prefix) if complete else None, tuple(prefix), text,
     )
+
+
+@lru_cache(maxsize=1)
+def _language() -> Any:
+    import tree_sitter_bash
+    from tree_sitter import Language
+    return Language(tree_sitter_bash.language())
 
 
 def analyze(command: str, *, dialect: str = "bash") -> Analysis:
     if dialect not in {"bash", "git_bash"}:
         return Analysis(False, False, (), ("unsupported_dialect",))
-    data = command.encode("utf-8")
+    try:
+        data = command.encode("utf-8")
+    except UnicodeError:
+        return Analysis(False, False, (), ("parse_error",))
     if len(data) > 65536:
         return Analysis(False, False, (), ("limit_exceeded",))
     try:
-        import tree_sitter_bash
-        from tree_sitter import Language, Parser
+        from tree_sitter import Parser
     except ImportError as exc:
         raise RuntimeError("Enable the optional pre-judge dependencies first") from exc
-    tree = Parser(Language(tree_sitter_bash.language())).parse(data)
+    tree = Parser(_language()).parse(data)
     root = tree.root_node
     if root.has_error:
         return Analysis(False, False, (), ("parse_error",))
@@ -144,11 +165,19 @@ def analyze(command: str, *, dialect: str = "bash") -> Analysis:
             return Analysis(True, False, tuple(nodes), ("limit_exceeded",))
         if node.type == "command":
             nodes.append(_parse_command(node, data))
+            if any(c.type not in _QUOTED and c.type != "command_name" for c in node.named_children):
+                unsupported.append("unsupported_construct")
+            # Substitutions inside arguments may contain executable nodes;
+            # their presence makes the whole command ineligible for ALLOW.
+            for child in reversed(node.named_children):
+                if _dynamic(child):
+                    unsupported.append("dynamic_word")
+                    pending.extend((c, depth + 1) for c in reversed(child.named_children))
             continue
-        if node.type in _CONTAINERS:
-            pending.extend((child, depth + 1) for child in reversed(node.named_children))
-        elif node.type != "comment":
+        if node.type not in _CONTAINERS and node.type != "comment":
             unsupported.append(node.type)
+        # Descend into unsupported wrappers for reliable BLOCK evidence.
+        pending.extend((child, depth + 1) for child in reversed(node.named_children))
     nodes.sort(key=lambda item: item.source_span)
     if not nodes:
         unsupported.append("no_commands")
@@ -237,6 +266,8 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
                 })
                 match = verdict.value() is True
             except Exception:
+                logger.warning("CEL evaluation failed for rule %s", rule.id, exc_info=True)
+                all_allowed = False
                 match = False
             if match:
                 matched.append(rule.id)
