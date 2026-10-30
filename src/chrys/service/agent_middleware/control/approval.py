@@ -749,17 +749,16 @@ class ApprovalMiddleware(FunctionMiddleware):
                 # argument approval. Reject *before* recording/publishing the
                 # updated arguments, and correct the decision audit.
                 final_args = context.arguments if isinstance(context.arguments, dict) else modified_args
-                if hook_blocked:
-                    return
                 if (
-                    self._prejudge.mode == "enforce"
+                    not hook_blocked
+                    and self._prejudge.mode == "enforce"
                     and tool_kind == KIND_SHELL
                     and json.dumps(final_args, sort_keys=True, default=str) != approved_edit_snapshot
                 ):
                     decision["status"] = "hook_rewrite_rejected"
                     decision.pop("modified_args", None)
                     context.metadata[_APPROVAL_REJECTED_KEY] = True
-                    context.metadata[_REJECTION_SOURCE_KEY] = "hook"
+                    context.metadata[_REJECTION_SOURCE_KEY] = "approval_invalidated"
                     context.metadata[_REJECTION_MESSAGE_KEY] = "Tool arguments changed after approval."
                     context.result = "Error: Tool arguments changed after approval; submit a new approval request."
                     return
@@ -782,6 +781,10 @@ class ApprovalMiddleware(FunctionMiddleware):
                     decision["modified_args"] = json.dumps(final_args, ensure_ascii=False)
                 except TypeError:
                     decision["modified_args"] = json.dumps(modified_args, ensure_ascii=False, default=str)
+                if hook_blocked:
+                    # Preserve the legacy UI/audit record of the edited args
+                    # even when the hook denies execution of those args.
+                    return
                 if binding is not None:
                     # An edit is approved once, for where the edited call acts now.
                     targets = await asyncio.to_thread(binding.targets, context)
