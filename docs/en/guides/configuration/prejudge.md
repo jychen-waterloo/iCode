@@ -1,37 +1,26 @@
-# Structured Pre-Judge (PR1, experimental)
+# Structured Shell Pre-Judge
 
-The optional AST/CEL router is separate from legacy regex/readonly routing,
-DAA, the LLM Judge, before-tool hooks and the post-tool shell filter.
-The default is off. The policy file is the trusted user configuration
-directory's prejudge.yaml (on Unix: ~/.chrys/prejudge.yaml).
-Workspace files are not consulted.
+iCode can optionally inspect Bash commands with a structured parser and CEL policy before the usual tool approval. It is **off by default**. The original approval rules, existing hooks, remembered grants, and the final Shell Command Filter remain in place.
 
-Modes: "off" keeps legacy behavior; "shadow" evaluates without changing
-approval decisions; "enforce" blocks a definite BLOCK and short-circuits a
-definite ALLOW only after mandatory sensitive-target checks. DEFER is routed
-to ordinary approval without the legacy readonly shortcut.
+Place `prejudge.yaml` in the user configuration directory (`~/.chrys/` on macOS/Linux; the iCode user configuration directory on Windows). Workspace files do not configure this feature.
 
-Example YAML (quote the mode; an unquoted 'off' is a YAML boolean):
+```yaml
+schema_version: 1
+mode: "shadow"
+policy_id: example-v1
+rules:
+  - id: block-rm
+    effect: block
+    target: command
+    when: 'prefix.size() > 0 && prefix[0] == "rm"'
+  - id: allow-git-status
+    effect: allow
+    target: command
+    when: 'argv == ["git", "status"]'
+```
 
-    schema_version: 1
-    mode: "enforce"
-    policy_id: basic-pilot-v1
-    rules:
-      - id: B-rm
-        effect: block
-        target: command
-        when: 'prefix.size() > 0 && prefix[0] == "rm"'
-      - id: A-status
-        effect: allow
-        target: command
-        when: 'argv == ["git", "status"]'
+The mode must be quoted: YAML interprets unquoted `off` as a Boolean. `off` retains the original behavior; `shadow` logs suggested decisions but does not enforce them; `enforce` blocks matching commands, allows fully covered commands when existing mandatory guards permit, and otherwise continues the ordinary approval process. Explicit BYPASS still has its existing meaning, and is not affected by this experimental pre-judge.
 
-Dependencies must be explicitly installed when enabled:
-tree-sitter==0.25.1, tree-sitter-bash==0.25.1,
-cel-expr-python==0.1.3. The official CEL Linux wheels require a glibc
-version newer than the offline Linux release floor of 2.17. Do not make this
-a required dependency before verifying the release matrix.
+Only Bash and Git Bash are supported. Other shells, including zsh, dash, sh, PowerShell, and cmd.exe, are not automatically parsed as Bash. In enforce mode, unsupported commands defer to regular approval (without the legacy readonly shortcut); this can increase approval prompts. Dynamic commands, redirects, globs, and most control-flow forms are never automatically allowed. Recognizable static commands inside unsupported syntax can still match a block rule, but the feature is not a complete shell security boundary.
 
-This branch remains experimental and is not a completed PR1 release:
-CEL compile-time Boolean checking, full syntax corpus, post-human-hook
-reapproval, distribution gates and full regression tests remain open.
+When enabled, the experimental feature requires the optional `tree-sitter==0.25.1`, `tree-sitter-bash==0.25.1`, and `cel-expr-python==0.1.3` packages. The CEL wheel does not cover the project's older glibc 2.17 offline Linux distribution target. Invalid configuration or missing CEL support causes a configuration error rather than silently disabling enforcement. Runtime parser failures defer to ordinary approval. The platform support and complete integration test gates remain under review.
