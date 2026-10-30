@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from functools import lru_cache
 import shlex
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -67,10 +67,13 @@ class Policy:
     rules: tuple[Rule, ...]
 
 
-_OPAQUE = frozenset({
-    "eval", ".", "source", "exec", "builtin", "trap", "xargs",
-    "sudo", "timeout", "nice", "nohup", "bash", "sh", "dash", "find",
-})
+_OPAQUE = frozenset(
+    {
+        ".", "bash", "builtin", "chrt", "command", "dash", "doas", "env",
+        "eval", "exec", "find", "ionice", "nice", "nohup", "sh", "source",
+        "stdbuf", "su", "sudo", "time", "timeout", "trap", "xargs",
+    }
+)
 _DYNAMIC = frozenset({
     "brace_expression", "glob_pattern", "extglob_pattern", "word_expansion",
     "expansion", "simple_expansion", "command_substitution",
@@ -84,7 +87,7 @@ _QUOTED = frozenset({"string", "raw_string", "ansi_c_string", "word", "concatena
 
 
 def _digest(command: str, dialect: str) -> str:
-    return hashlib.sha256((dialect + "\x00" + command).encode("utf-8")).hexdigest()
+    return hashlib.sha256((dialect + "\x00" + command).encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def _dynamic(node: Any) -> bool:
@@ -205,25 +208,25 @@ def _cel_env() -> Any:
     })
 
 
-def load_policy(path: Path) -> Policy:
-    if not path.exists():
-        return Policy("off", "", ())
-    content = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(content, dict) or set(content) - {
-        "schema_version", "mode", "policy_id", "rules"
-    }:
-        raise ValueError("Invalid pre-judge configuration")
-    if type(content.get("schema_version")) is not int or content["schema_version"] != 1:
-        raise ValueError("Invalid pre-judge schema_version")
-    mode = content.get("mode")
-    if mode not in ("off", "shadow", "enforce"):
-        raise ValueError("mode must be quoted 'off', 'shadow', or 'enforce'")
-    if mode == "off":
-        return Policy("off", "", ())
+def _ensure_bash_parser() -> None:
+    """Fail during configuration, not at the first shell invocation."""
+    try:
+        from tree_sitter import Parser
+
+        Parser(_language())
+    except Exception as exc:
+        raise RuntimeError(
+            "Enabled pre-judge requires tree-sitter==0.25.1 and "
+            "tree-sitter-bash==0.25.1 with a compatible Bash grammar"
+        ) from exc
+
+
+def _compile_enabled_policy(content: dict[str, Any], mode: str) -> Policy:
     ident = content.get("policy_id")
     raw_rules = content.get("rules")
     if not isinstance(ident, str) or not ident or not isinstance(raw_rules, list) or len(raw_rules) > 1000:
         raise ValueError("Invalid pre-judge policy_id or rules")
+    _ensure_bash_parser()
     env = _cel_env()
     rules: list[Rule] = []
     seen: set[str] = set()
@@ -238,12 +241,38 @@ def load_policy(path: Path) -> Policy:
         if not isinstance(when, str) or not when or len(when) > 4096:
             raise ValueError("Invalid CEL expression")
         expression = env.compile(f"({when}) && true")
-        # The trailing boolean conjunction forces CEL to statically check
-        # the policy's when expression as a boolean at load time.
+        # CEL statically checks the expression as Boolean at load time.
         seen.add(rid)
         rules.append(Rule(rid, Route(effect), expression))
     return Policy(mode, ident, tuple(rules))
 
+
+def load_policy(path: Path) -> Policy:
+    if not path.exists():
+        return Policy("off", "", ())
+    content: Any = None
+    try:
+        content = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(content, dict) or set(content) - {
+            "schema_version", "mode", "policy_id", "rules"
+        }:
+            raise ValueError("Invalid pre-judge configuration")
+        if type(content.get("schema_version")) is not int or content["schema_version"] != 1:
+            raise ValueError("Invalid pre-judge schema_version")
+        mode = content.get("mode")
+        if mode not in ("off", "shadow", "enforce"):
+            raise ValueError("mode must be quoted 'off', 'shadow', or 'enforce'")
+        if mode == "off":
+            return Policy("off", "", ())
+        return _compile_enabled_policy(content, mode)
+    except Exception:
+        # A *declared* shadow policy has no enforcement authority. Bad
+        # rules/missing optional deps must not prevent iCode from starting.
+        # Unknown or malformed mode is NOT silently interpreted as shadow.
+        if isinstance(content, dict) and content.get("mode") == "shadow":
+            logger.warning("Invalid shadow pre-judge policy; disabling observation", exc_info=True)
+            return Policy("off", "", ())
+        raise
 
 def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     digest = _digest(command, dialect)
