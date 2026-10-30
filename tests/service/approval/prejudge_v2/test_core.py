@@ -71,6 +71,6 @@ def test_off_and_missing_config(tmp_path):
 ])
 def test_invalid_config(tmp_path, config):
     file = tmp_path / "prejudge.yaml"
-    file.write_text(config)
+    file.write_text(config, encoding="utf-8")
     with pytest.raises(ValueError):
         pj.load_policy(file)
