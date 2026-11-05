@@ -22,7 +22,7 @@ def replace_once(value: str, original: str, replacement: str) -> str:
     return value.replace(original, replacement)
 
 
-def stage(source: Path, target: Path, bazel_binary: Path, smoke: Path) -> None:
+def stage(source: Path, target: Path, bazel_binary: Path, smoke: Path, prejudge: Path, integration_smoke: Path) -> None:
     sha = subprocess.check_output(
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True, stdin=subprocess.DEVNULL
     ).strip()
@@ -41,6 +41,8 @@ def stage(source: Path, target: Path, bazel_binary: Path, smoke: Path) -> None:
     for name in ("setup.py", "cel_basic_test.py"):
         shutil.copy2(release / name, target / name)
     shutil.copy2(smoke, target / "icode_cel_smoke.py")
+    shutil.copy2(prejudge, target / "prejudge_under_test.py")
+    shutil.copy2(integration_smoke, target / "icode_prejudge_smoke.py")
     shutil.copy2(bazel_binary, target / "bazel-pinned")
     (target / "bazel-pinned").chmod(0o755)
 
@@ -68,6 +70,11 @@ def stage(source: Path, target: Path, bazel_binary: Path, smoke: Path) -> None:
         config, 'test-command = "python {project}/cel_basic_test.py"',
         'test-command = "python {project}/cel_basic_test.py && python {project}/icode_cel_smoke.py"',
     )
+    config = replace_once(
+        config,
+        'build-verbosity = 1',
+        'test-requires = ["PyYAML==6.0.3", "tree-sitter==0.25.1", "tree-sitter-bash==0.25.1"]\nbuild-verbosity = 1',
+    )
     (target / "pyproject.toml").write_text(config, encoding="utf-8")
 
     # Upstream setup.py updates python.defaults(3.11) at build time, but the
@@ -94,8 +101,13 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--bazel", type=Path, required=True)
     parser.add_argument("--smoke", type=Path, required=True)
+    parser.add_argument("--prejudge", type=Path, required=True)
+    parser.add_argument("--integration-smoke", type=Path, required=True)
     opts = parser.parse_args()
-    stage(opts.source.resolve(), opts.output.resolve(), opts.bazel.resolve(), opts.smoke.resolve())
+    stage(
+        opts.source.resolve(), opts.output.resolve(), opts.bazel.resolve(),
+        opts.smoke.resolve(), opts.prejudge.resolve(), opts.integration_smoke.resolve(),
+    )
 
 
 if __name__ == "__main__":
