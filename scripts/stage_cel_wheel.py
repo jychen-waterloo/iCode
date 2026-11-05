@@ -68,7 +68,7 @@ def stage(source: Path, target: Path, bazel_binary: Path, smoke: Path, prejudge:
     )
     config = replace_once(
         config, 'test-command = "python {project}/cel_basic_test.py"',
-        'test-command = "python {project}/cel_basic_test.py && python {project}/icode_cel_smoke.py"',
+        'test-command = "python {project}/cel_basic_test.py && python {project}/icode_cel_smoke.py && python {project}/icode_prejudge_smoke.py"',
     )
     config = replace_once(
         config,
