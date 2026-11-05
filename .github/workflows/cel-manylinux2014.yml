@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cel-manylinux2014-${ inputs.build }
+  group: cel-manylinux2014-${{ inputs.build }}
   cancel-in-progress: false
 
 env:
@@ -29,7 +29,7 @@ env:
 
 jobs:
   build:
-    name: CEL cp314 on ${ matrix.arch }
+    name: CEL cp314 on ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +44,7 @@ jobs:
             image: quay.io/pypa/manylinux2014_aarch64@sha256:91bd6b14c15fe85c75118bc69dcbc7cb885abdb2436b5323c1ac29fcb1a81623
             bazel: https://github.com/bazelbuild/bazel/releases/download/8.5.1/bazel-8.5.1-linux-arm64
             bazel_sha256: b7f2a85595e8a87d54843bc656c1e379fd9b8c1b5f783dc41717c1d7eb7cc49f
-    runs-on: ${ matrix.runner }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
       - name: Checkout iCode scripts
@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: cel-expr/cel-python
-          ref: ${ env.CEL_COMMIT }
+          ref: ${{ env.CEL_COMMIT }}
           path: cel-source
           persist-credentials: false
       - name: Setup pinned project Python
@@ -63,8 +63,8 @@ jobs:
           allow-prereleases: true
       - name: Download and authenticate Bazel binary
         env:
-          BAZEL_URL: ${ matrix.bazel }
-          BAZEL_SHA256: ${ matrix.bazel_sha256 }
+          BAZEL_URL: ${{ matrix.bazel }}
+          BAZEL_SHA256: ${{ matrix.bazel_sha256 }}
         run: |
           set -euo pipefail
           test "$(git -C cel-source rev-parse HEAD)" = "$CEL_COMMIT"
@@ -85,16 +85,16 @@ jobs:
         uses: pypa/cibuildwheel@b9e566a2b284570af229f6c2a33673410d0389a3 # v4.3.4
         env:
           CIBW_PLATFORM: linux
-          CIBW_ARCHS: ${ matrix.arch }
-          CIBW_BUILD: cp314-manylinux_${ matrix.arch }
-          CIBW_MANYLINUX_X86_64_IMAGE: ${ matrix.image }
-          CIBW_MANYLINUX_AARCH64_IMAGE: ${ matrix.image }
+          CIBW_ARCHS: ${{ matrix.arch }}
+          CIBW_BUILD: cp314-manylinux_${{ matrix.arch }}
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ matrix.image }}
+          CIBW_MANYLINUX_AARCH64_IMAGE: ${{ matrix.image }}
         with:
           package-dir: cel-stage
           output-dir: wheelhouse
       - name: Audit final wheel and native symbols
         env:
-          TARGET_ARCH: ${ matrix.arch }
+          TARGET_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -107,7 +107,7 @@ jobs:
       - name: Upload wheel and evidence (not a published release)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cel-0.1.3-cp314-${ matrix.arch }
+          name: cel-0.1.3-cp314-${{ matrix.arch }}
           path: |
             wheelhouse/*
             wheel-auditwheel.txt
@@ -129,8 +129,8 @@ jobs:
           path: wheelhouse
       - name: Verify checksums and publish an unused rebuild number
         env:
-          GH_TOKEN: ${ github.token }
-          BUILD_NUMBER: ${ inputs.build }
+          GH_TOKEN: ${{ github.token }}
+          BUILD_NUMBER: ${{ inputs.build }}
         run: |
           set -euo pipefail
           [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]
