@@ -76,7 +76,9 @@ jobs:
         run: |
           python scripts/stage_cel_wheel.py \
             --source cel-source --output cel-stage \
-            --bazel bazel-pinned --smoke scripts/cel_native_smoke.py
+            --bazel bazel-pinned --smoke scripts/cel_native_smoke.py \
+            --prejudge src/chrys/service/approval/prejudge_v2/__init__.py \
+            --integration-smoke scripts/cel_prejudge_smoke.py
           ! grep -F 'http.sslVerify false' cel-stage/pyproject.toml
           grep -F 'version = "0.1.3"' cel-stage/pyproject.toml
       - name: Build and smoke-test native wheel inside manylinux2014
