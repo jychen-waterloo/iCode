@@ -3,8 +3,6 @@ name: CEL manylinux2014 wheels
 # The pinned upstream tag contains Bazel-based C++ extensions. This workflow
 # builds artifacts on native runners; publishing is a separate explicit step.
 on:
-  push:
-    branches: [feat/prejudge-structured-pr1] # Temporary branch validation; remove before merge
   workflow_dispatch:
     inputs:
       build:
