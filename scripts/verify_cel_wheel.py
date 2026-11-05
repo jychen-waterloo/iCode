@@ -54,8 +54,17 @@ def check_wheel(wheel: Path, arch: str) -> dict[str, object]:
                 maxima[kind] = max(maxima.get(kind, ()), v)
                 if v > LIMITS[kind]:
                     raise ValueError(f"{name}: requires {kind}_{version}, exceeds {LIMITS[kind]}")
-            if "(RPATH)" in dynamic or "(RUNPATH)" in dynamic:
-                raise ValueError(f"{name}: contains RPATH/RUNPATH; audit linking explicitly")
+            for line in dynamic.splitlines():
+                if "(RPATH)" not in line and "(RUNPATH)" not in line:
+                    continue
+                match = re.search(r"Library (?:rpath|runpath): \[(.*?)\]", line)
+                if match is None:
+                    raise ValueError(f"{name}: unrecognized RPATH/RUNPATH: {line}")
+                # auditwheel may legitimately install bundled libs under
+                # $ORIGIN/.libs; an absolute or non-origin path is not portable.
+                if any(not path.startswith("$ORIGIN/") and path != "$ORIGIN"
+                       for path in match.group(1).split(":")):
+                    raise ValueError(f"{name}: non-relocatable RPATH/RUNPATH: {line}")
             native.append({
                 "path": name,
                 "max_versions": {k: ".".join(map(str, v)) for k, v in maxima.items()},
