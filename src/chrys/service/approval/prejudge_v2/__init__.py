@@ -197,14 +197,14 @@ def _cel_env() -> Any:
         from cel_expr_python import cel
     except ImportError as exc:
         raise RuntimeError(
-            "Enabled pre-judge requires cel-expr-python==0.1.3; "
+            "Enabled pre-judge requires the cel-expr-python==0.1.3 backend; "
             "its Linux wheels are not compatible with glibc 2.17"
         ) from exc
     # CEL's expression engine provides checked expressions and no Python
     # evaluation, file, process or network functions.
     return cel.NewEnv(variables={
-        "argv": cel.Type.list(cel.Type.STRING),
-        "prefix": cel.Type.list(cel.Type.STRING),
+        "argv": cel.Type.List(cel.Type.STRING),
+        "prefix": cel.Type.List(cel.Type.STRING),
     })
 
 
