@@ -46,6 +46,13 @@ def check_wheel(wheel: Path, arch: str) -> dict[str, object]:
                 continue
             target = Path(tmp) / f"elf-{len(native)}"
             target.write_bytes(blob)
+            header = subprocess.check_output(["readelf", "-W", "-h", str(target)], text=True)
+            expected_machine = "X86-64" if arch == "x86_64" else "AARCH64"
+            machine = re.search(r"Machine:\s+([^\n]+)", header)
+            if machine is None or expected_machine not in machine.group(1).upper():
+                raise ValueError(f"{name}: ELF machine does not match {arch}: {machine}")
+            if "ELF64" not in header:
+                raise ValueError(f"{name}: expected 64-bit ELF")
             symbols = subprocess.check_output(["readelf", "-W", "--version-info", str(target)], text=True)
             dynamic = subprocess.check_output(["readelf", "-W", "-d", str(target)], text=True)
             maxima: dict[str, tuple[int, ...]] = {}
