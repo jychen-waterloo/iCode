@@ -56,7 +56,6 @@ _JOB_WRITE_GRANTS = frozenset(
         ("cd.yml", "publish-pypi", "id-token"),
         ("cd.yml", "release", "contents"),
         ("pillow-manylinux2014.yml", "publish", "contents"),
-        ("cel-manylinux2014.yml", "publish", "contents"),
     }
 )
 
