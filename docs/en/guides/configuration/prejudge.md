@@ -36,7 +36,7 @@ Each rule has exactly **one** matcher (no expressions, globbing, regex or logica
 | `argv_first: [echo]` | First token of the complete literal argument vector equals the given token | ALLOW or BLOCK |
 | `prefix_first: [rm]` | First *reliably known static prefix* token equals the given token, even if later arguments are dynamic | BLOCK only |
 
-Matcher values must be **lists of non-empty literal strings**, even when there is only one token. Unknown keys, extra match fields, empty lists, non-string values, and `when:` expressions are rejected during policy loading. This is the initial experimental `schema_version: 1`; configurations written for the previous CEL `when:` prototype must be migrated. No implicit conversion from an expression is performed.
+Matcher values must be **lists of non-empty literal strings**, even when there is only one token. An ALLOW rule using `argv_first: [git]` would grant *all* Git subcommands, including mutating ones; prefer `argv_exact` for commands with risk-bearing arguments. Unknown keys, extra match fields, empty lists, non-string values, and `when:` expressions are rejected during policy loading. This is the initial experimental `schema_version: 1`; configurations written for the previous CEL `when:` prototype must be migrated. No implicit conversion from an expression is performed.
 
 ### Decision safety
 
