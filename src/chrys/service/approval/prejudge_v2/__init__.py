@@ -1,9 +1,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Conservative AST/CEL pre-judge; independent of the legacy shell filter.
+"""Conservative AST and structured YAML pre-judge, independent of the legacy shell filter.
 
 This module never executes or rewrites a command. Unsupported or incomplete
-syntax cannot yield ALLOW. Optional dependencies are imported only when an
-enabled policy is loaded.
+syntax cannot yield ALLOW. Only Tree-sitter is an optional runtime dependency.
 """
 from __future__ import annotations
 
@@ -14,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -53,11 +52,22 @@ class PreJudgeResult:
     analysis_digest: str
 
 
+MatcherField = Literal["argv_exact", "argv_first", "prefix_first"]
+
+
+@dataclass(frozen=True, slots=True)
+class Matcher:
+    """A single checked operation on static argv or trusted static prefix."""
+
+    field: MatcherField
+    tokens: tuple[str, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class Rule:
     id: str
     effect: Route
-    expression: Any
+    match: Matcher
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +75,6 @@ class Policy:
     mode: str
     policy_id: str
     rules: tuple[Rule, ...]
-
 
 _OPAQUE = frozenset(
     {
@@ -192,22 +201,6 @@ def analyze(command: str, *, dialect: str = "bash") -> Analysis:
     return Analysis(True, not unsupported, tuple(nodes), tuple(dict.fromkeys(unsupported)))
 
 
-def _cel_env() -> Any:
-    try:
-        from cel_expr_python import cel
-    except ImportError as exc:
-        raise RuntimeError(
-            "Enabled pre-judge requires the cel-expr-python==0.1.3 backend; "
-            "its Linux wheels are not compatible with glibc 2.17"
-        ) from exc
-    # CEL's expression engine provides checked expressions and no Python
-    # evaluation, file, process or network functions.
-    return cel.NewEnv(variables={
-        "argv": cel.Type.List(cel.Type.STRING),
-        "prefix": cel.Type.List(cel.Type.STRING),
-    })
-
-
 def _ensure_bash_parser() -> None:
     """Fail during configuration, not at the first shell invocation."""
     try:
@@ -221,30 +214,58 @@ def _ensure_bash_parser() -> None:
         ) from exc
 
 
+def _compile_matcher(raw: object, *, effect: Route) -> Matcher:
+    if not isinstance(raw, dict) or len(raw) != 1:
+        raise ValueError("Each match must have exactly one matcher field")
+    field, tokens = next(iter(raw.items()))
+    if field not in {"argv_exact", "argv_first", "prefix_first"}:
+        raise ValueError(f"Unsupported Pre-Judge matcher: {field!r}")
+    if (
+        not isinstance(tokens, list)
+        or not tokens
+        or len(tokens) > 128
+        or any(type(token) is not str or not token or len(token) > 4096 for token in tokens)
+    ):
+        raise ValueError(f"Matcher {field} needs a non-empty list of literal string tokens")
+    if field != "argv_exact" and len(tokens) != 1:
+        raise ValueError(f"Matcher {field} requires exactly one token")
+    if field == "prefix_first" and effect is Route.ALLOW:
+        raise ValueError("prefix_first cannot be used to ALLOW incomplete commands")
+    return Matcher(field, tuple(tokens))
+
+
 def _compile_enabled_policy(content: dict[str, Any], mode: str) -> Policy:
     ident = content.get("policy_id")
     raw_rules = content.get("rules")
     if not isinstance(ident, str) or not ident or not isinstance(raw_rules, list) or len(raw_rules) > 1000:
         raise ValueError("Invalid pre-judge policy_id or rules")
     _ensure_bash_parser()
-    env = _cel_env()
     rules: list[Rule] = []
     seen: set[str] = set()
     for raw in raw_rules:
-        if not isinstance(raw, dict) or set(raw) != {"id", "effect", "target", "when"}:
-            raise ValueError("Invalid pre-judge rule fields")
-        rid, effect, target, when = (raw[key] for key in ("id", "effect", "target", "when"))
+        if not isinstance(raw, dict) or set(raw) != {"id", "effect", "target", "match"}:
+            raise ValueError("Invalid pre-judge rule fields; expected id, effect, target, match")
+        rid, effect, target = (raw[key] for key in ("id", "effect", "target"))
         if not isinstance(rid, str) or not rid or rid in seen:
             raise ValueError("Duplicate or invalid pre-judge rule ID")
         if effect not in ("allow", "block") or target != "command":
             raise ValueError("Invalid pre-judge effect or target")
-        if not isinstance(when, str) or not when or len(when) > 4096:
-            raise ValueError("Invalid CEL expression")
-        expression = env.compile(f"({when}) && true")
-        # CEL statically checks the expression as Boolean at load time.
+        decision = Route(effect)
+        matcher = _compile_matcher(raw["match"], effect=decision)
         seen.add(rid)
-        rules.append(Rule(rid, Route(effect), expression))
+        rules.append(Rule(rid, decision, matcher))
     return Policy(mode, ident, tuple(rules))
+
+
+def _matches(matcher: Matcher, node: CommandNode) -> bool:
+    """No expansions, expression interpreter or implicit prefix matching."""
+    if matcher.field == "prefix_first":
+        return bool(node.prefix) and node.prefix[0] == matcher.tokens[0]
+    if node.argv is None:
+        return False
+    if matcher.field == "argv_first":
+        return bool(node.argv) and node.argv[0] == matcher.tokens[0]
+    return node.argv == matcher.tokens
 
 
 def load_policy(path: Path) -> Policy:
@@ -285,20 +306,8 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     for node in analysis.executable_nodes:
         allowed = False
         for rule in policy.rules:
-            # Incomplete argv can be used for a confirmed block through its
-            # static prefix, but never for an ALLOW decision.
-            if rule.effect is Route.ALLOW and node.argv is None:
-                continue
-            try:
-                verdict = rule.expression.eval(data={
-                    "argv": list(node.argv or ()),
-                    "prefix": list(node.prefix),
-                })
-                match = verdict.value() is True
-            except Exception:
-                logger.warning("CEL evaluation failed for rule %s", rule.id, exc_info=True)
-                all_allowed = False
-                match = False
+            # ALLOW can never be justified by only a static prefix.
+            match = _matches(rule.match, node)
             if match:
                 matched.append(rule.id)
                 spans.append(node.source_span)
