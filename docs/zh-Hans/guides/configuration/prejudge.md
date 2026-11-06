@@ -1,8 +1,8 @@
 # 结构化 Shell Pre-Judge
 
-iCode 可选地使用 Bash 语法解析器和 CEL 策略分析命令，再进入工具审批。**默认关闭**。原有审批规则、Hook、授权复用以及后置 Shell Command Filter 不会被替换。
+iCode 可以使用 Tree-sitter 和**固定结构的 YAML 匹配规则**分析 Bash 指令，再进入原有工具审批。功能**默认关闭**，不替换旧 regex/readonly Pre-Judge、DAA、Hook、授权复用或后置 Shell Command Filter。
 
-请在用户级配置目录放置 `prejudge.yaml`（macOS/Linux 通常为 `~/.chrys/`，Windows 使用 iCode 用户配置目录）。不会从工作区加载策略。
+将配置存放在受信任的用户级目录中（macOS/Linux 通常为 `~/.chrys/prejudge.yaml`），不会从项目工作目录加载策略。
 
 ```yaml
 schema_version: 1
@@ -12,17 +12,38 @@ rules:
   - id: block-rm
     effect: block
     target: command
-    when: 'prefix.size() > 0 && prefix[0] == "rm"'
+    match:
+      prefix_first: [rm]
   - id: allow-git-status
     effect: allow
     target: command
-    when: 'argv == ["git", "status"]'
+    match:
+      argv_exact: [git, status]
+  - id: allow-echo
+    effect: allow
+    target: command
+    match:
+      argv_first: [echo]
 ```
 
-配置中的 `mode` 必须带引号，否则 YAML 可能将 `off` 解释为布尔值。`off` 保持原行为；`shadow` 只记录新决策，不影响执行；`enforce` 阻止确定匹配的 BLOCK，只在原有强制检查允许时快捷批准完全覆盖的 ALLOW，其他情况进入常规审批。显式 BYPASS 模式不执行新 Pre-Judge 的 BLOCK 规则。无交互模式的 `icode run` 和 `icode workflow run` 使用 BYPASS，因此这套 BLOCK 策略不保护这些执行。
+### 匹配规则
 
-当前只支持 Bash / Git Bash；不把 zsh、sh、dash、PowerShell 或 cmd.exe 误认为 Bash。未知方言或不支持的语法不能被新模块自动 ALLOW；在 enforce 下通常仍需人工或 Judge 审批，可能增加弹窗。变量展开、重定向、通配符和大多数控制流结构不能自动批准；其中确定的静态命令节点仍可能命中 BLOCK。该功能不能代替完整 Shell 安全边界。
+每条规则的 `match` **必须且只能包含一个**受支持字段，不支持任意表达式、正则、通配符或 AND/OR/NOT：
 
-启用时需要额外安装 `tree-sitter==0.25.1`、`tree-sitter-bash==0.25.1` 和 `cel-expr-python==0.1.3`。CEL 的 Linux wheel 不兼容目前离线发行版本的 glibc 2.17 最低要求。enforce 模式下无效配置或缺少 Parser/CEL 后端会报配置错误，不会静默关闭安全策略；shadow 模式下配置或依赖错误会记录警告并关闭观察功能；解析器运行失败则交由常规审批处理。发行兼容和完整集成测试仍待验收。
+| 字段 | 匹配条件 | 允许效果 |
+| --- | --- | --- |
+| `argv_exact: [git, status]` | 完整静态参数列表与给定序列完全相等 | ALLOW 或 BLOCK |
+| `argv_first: [echo]` | 完整静态参数列表的第一个 token 相等 | ALLOW 或 BLOCK |
+| `prefix_first: [rm]` | 可确定的静态前缀的第一个 token 相等，即使后面有动态参数 | **只允许 BLOCK** |
 
-`command rm`、`env rm`、`time rm` 等包装命令在此版本中属于 opaque；仅匹配 `prefix[0] == "rm"` 的 BLOCK 规则不会命中这些命令，但它们不会被自动批准，而是进入 DEFER。
+值必须是非空字符串组成的**列表**，即使只有一个 token。未知字段、多个匹配字段、空值、非字符串值和旧版 CEL `when:` 表达式都会在加载时拒绝。此前实验性 `when:` 配置必须人工迁移；本版本的 `schema_version: 1` 不提供自动兼容。
+
+### 鉴权语义
+
+BLOCK 优先于 ALLOW。要自动 ALLOW，必须所有可执行 AST 节点匹配 ALLOW、命令 `argv` 完整且语法覆盖完整；否则 DEFER，走常规审批（`enforce` 不再使用旧 readonly 快捷批准）。**静态前缀只能用于 BLOCK**。例如 `echo "rm"` 里的 `rm` 是参数，不是另一个可执行命令。
+
+`mode` 必须加引号，避免 YAML 将 `off` 转成布尔值。`off` 保留旧行为；`shadow` 只记录观察结果；`enforce` 执行明确的 BLOCK 和完全覆盖的 ALLOW。enforce 配置无效时初始化失败；shadow 配置错误会记录警告并停止观察。显式 BYPASS 不执行新 BLOCK 规则；无交互的 `icode run` 和 `icode workflow run` 使用 BYPASS。
+
+当前只支持 Bash/Git Bash。zsh、sh、dash、PowerShell、cmd.exe、动态展开、重定向、通配符及多数控制流构造不允许自动 ALLOW；内部可靠识别的静态命令仍有机会触发 BLOCK。像 `command rm`、`env rm`、`time rm` 这样的包装命令按 opaque 处理并 DEFER，不能假设 `prefix_first: [rm]` 会命中包装命令里的 `rm`。本功能不能取代完整的 Shell 安全边界。
+
+**依赖：**启用该功能需要 `tree-sitter==0.25.1` 与 `tree-sitter-bash==0.25.1`。不再依赖 CEL、额外自编译 wheel 或侧车进程；默认 `off` 不会加载 Tree-sitter。依赖锁定和 Linux 离线发行的完整验证仍属于独立发行验收项。
