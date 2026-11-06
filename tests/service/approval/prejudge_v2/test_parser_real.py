@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from chrys.service.approval.prejudge_v2 import analyze
+from chrys.service.approval.prejudge_v2 import Route, analyze, load_policy, route
 
 pytest.importorskip("tree_sitter")
 pytest.importorskip("tree_sitter_bash")
@@ -64,3 +64,33 @@ def test_unsupported_shell_dialect_is_explicit_defer(dialect):
 def test_nested_executable_rm_keeps_block_evidence(cmd):
     result = analyze(cmd, dialect="bash")
     assert any(node.prefix[:1] == ("rm",) for node in result.executable_nodes)
+
+
+def test_yaml_matchers_with_real_bash_ast(tmp_path):
+    """Do not mock either the parser or the policy loader."""
+    file = tmp_path / "prejudge.yaml"
+    file.write_text(
+        'schema_version: 1\nmode: "enforce"\npolicy_id: smoke\n'
+        'rules:\n'
+        '  - id: block-rm\n    effect: block\n    target: command\n'
+        '    match:\n      prefix_first: [rm]\n'
+        '  - id: allow-status\n    effect: allow\n    target: command\n'
+        '    match:\n      argv_exact: [git, status]\n'
+        '  - id: allow-echo\n    effect: allow\n    target: command\n'
+        '    match:\n      argv_first: [echo]\n',
+        encoding="utf-8",
+    )
+    policy = load_policy(file)
+    cases = (
+        ("git status", Route.ALLOW),
+        ("rm fixture", Route.BLOCK),
+        ('echo "rm"', Route.ALLOW),
+        ("git status && rm fixture", Route.BLOCK),
+        ("git status && unknown_tool", Route.DEFER),
+        ('echo "$(rm fixture)"', Route.BLOCK),
+        ('rm "$TARGET"', Route.BLOCK),
+        ("git status > out.txt", Route.DEFER),
+    )
+    for command, expected in cases:
+        result = route(command, "bash", policy)
+        assert result.route is expected, (command, expected, result)
