@@ -1,9 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Reproducible microbenchmark: legacy readonly pre-judge vs AST/CEL PR1.
+"""Reproducible microbenchmark: legacy readonly pre-judge vs structured AST/YAML PR1.
 
 Measures the synchronous decision functions only; does not execute commands,
 perform Hooks or LLM review, or measure end-to-end tool authorization.
-Optional dependencies must be installed explicitly.
+Only the optional Tree-sitter parser dependencies are needed.
 """
 from __future__ import annotations
 
@@ -48,23 +48,28 @@ rules:
   - id: block-rm
     effect: block
     target: command
-    when: 'prefix.size() > 0 && prefix[0] == "rm"'
+    match:
+      prefix_first: [rm]
   - id: allow-git-status
     effect: allow
     target: command
-    when: 'argv == ["git", "status"]'
+    match:
+      argv_exact: [git, status]
   - id: allow-echo
     effect: allow
     target: command
-    when: 'argv.size() > 0 && argv[0] == "echo"'
+    match:
+      argv_first: [echo]
   - id: allow-pwd
     effect: allow
     target: command
-    when: 'argv == ["pwd"]'
+    match:
+      argv_exact: [pwd]
   - id: allow-wc
     effect: allow
     target: command
-    when: 'argv.size() > 0 && argv[0] == "wc"'
+    match:
+      argv_first: [wc]
 """
 
 
