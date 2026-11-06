@@ -20,6 +20,26 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Reject duplicate YAML keys instead of silently replacing a rule field."""
+
+
+def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode) -> dict[Any, Any]:
+    result: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if key in result:
+            raise ValueError(f"Duplicate YAML policy key: {key!r}")
+        result[key] = loader.construct_object(value_node, deep=True)
+    return result
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
 class Route(StrEnum):
     ALLOW = "allow"
     BLOCK = "block"
@@ -273,7 +293,7 @@ def load_policy(path: Path) -> Policy:
         return Policy("off", "", ())
     content: Any = None
     try:
-        content = yaml.safe_load(path.read_text(encoding="utf-8"))
+        content = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
         if not isinstance(content, dict) or set(content) - {
             "schema_version", "mode", "policy_id", "rules"
         }:
