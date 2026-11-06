@@ -1,8 +1,8 @@
 # Structured Shell Pre-Judge
 
-iCode can optionally inspect Bash commands with a structured parser and CEL policy before the usual tool approval. It is **off by default**. The original approval rules, existing hooks, remembered grants, and the final Shell Command Filter remain in place.
+iCode can optionally inspect Bash commands using Tree-sitter and a small set of **structured YAML matchers** before ordinary tool approval. It is **off by default**. Existing regex/read-only approval, DAA, Hooks, remembered grants, and the post-execution Shell Command Filter are not replaced.
 
-Place `prejudge.yaml` in the user configuration directory (`~/.chrys/` on macOS/Linux; the iCode user configuration directory on Windows). Workspace files do not configure this feature.
+Place `prejudge.yaml` in iCode's trusted user configuration directory (`~/.chrys/prejudge.yaml` on macOS/Linux). Workspace files do not provide rules.
 
 ```yaml
 schema_version: 1
@@ -12,17 +12,38 @@ rules:
   - id: block-rm
     effect: block
     target: command
-    when: 'prefix.size() > 0 && prefix[0] == "rm"'
+    match:
+      prefix_first: [rm]
   - id: allow-git-status
     effect: allow
     target: command
-    when: 'argv == ["git", "status"]'
+    match:
+      argv_exact: [git, status]
+  - id: allow-echo
+    effect: allow
+    target: command
+    match:
+      argv_first: [echo]
 ```
 
-The mode must be quoted: YAML interprets unquoted `off` as a Boolean. `off` retains the original behavior; `shadow` logs suggested decisions but does not enforce them; `enforce` blocks matching commands, allows fully covered commands when existing mandatory guards permit, and otherwise continues the ordinary approval process. Explicit BYPASS does not apply Pre-Judge BLOCK rules. Headless `icode run` and `icode workflow run` use BYPASS, so these rules do not protect those executions.
+### Matcher reference
 
-Only Bash and Git Bash are supported. Other shells, including zsh, dash, sh, PowerShell, and cmd.exe, are not automatically parsed as Bash. In enforce mode, unsupported commands defer to regular approval (without the legacy readonly shortcut); this can increase approval prompts. Dynamic commands, redirects, globs, and most control-flow forms are never automatically allowed. Recognizable static commands inside unsupported syntax can still match a block rule, but the feature is not a complete shell security boundary.
+Each rule has exactly **one** matcher (no expressions, globbing, regex or logical operators):
 
-When enabled, the experimental feature requires the optional `tree-sitter==0.25.1`, `tree-sitter-bash==0.25.1`, and `cel-expr-python==0.1.3` packages. The CEL wheel does not cover the project's older glibc 2.17 offline Linux distribution target. Invalid enforce configuration or missing parser/CEL support causes a configuration error rather than silently disabling enforcement. Invalid shadow configuration or unavailable dependencies disable shadow observation with a logged warning. Runtime parser failures defer to ordinary approval. The platform support and complete integration test gates remain under review.
+| Matcher | Meaning | Allowed effects |
+| --- | --- | --- |
+| `argv_exact: [git, status]` | Full literal argument vector equals exactly the given non-empty sequence | ALLOW or BLOCK |
+| `argv_first: [echo]` | First token of the complete literal argument vector equals the given token | ALLOW or BLOCK |
+| `prefix_first: [rm]` | First *reliably known static prefix* token equals the given token, even if later arguments are dynamic | BLOCK only |
 
-Wrapper commands such as `command rm`, `env rm`, or `time rm` are opaque in this version; a BLOCK rule matching only `prefix[0] == "rm"` does not match them. They defer rather than being automatically approved.
+Matcher values must be **lists of non-empty literal strings**, even when there is only one token. Unknown keys, extra match fields, empty lists, non-string values, and `when:` expressions are rejected during policy loading. This is the initial experimental `schema_version: 1`; configurations written for the previous CEL `when:` prototype must be migrated. No implicit conversion from an expression is performed.
+
+### Decision safety
+
+BLOCK has priority over ALLOW. An automatic ALLOW requires **every executable AST node** to match an ALLOW rule, complete static argv and full supported syntax coverage. Otherwise the result is DEFER and follows normal approval (without the legacy readonly shortcut in `enforce`). A match on a prefix is **never sufficient for ALLOW**. A quoted dangerous word such as `echo "rm"` is not a separate executable `rm`.
+
+The mode must be quoted: YAML may interpret unquoted `off` as a Boolean. `off` retains legacy behavior; `shadow` logs proposed decisions without enforcing them; `enforce` applies BLOCK and eligible ALLOW. Invalid enforce configuration fails during setup; invalid shadow configuration logs a warning and stops observation. Explicit BYPASS does **not** apply these BLOCK rules: headless `icode run` and `icode workflow run` use BYPASS.
+
+Only Bash / Git Bash is supported. Other shells (zsh, sh, dash, PowerShell, cmd.exe), redirections, dynamic expansions, globs, and most control-flow constructs cannot be automatically allowed. A reliably parsed inner command can still trigger BLOCK. Opaque command wrappers such as `command rm`, `env rm` and `time rm` are deferred: a rule for `prefix_first: [rm]` does not establish that the wrapped `rm` is a direct command node. This is not a complete Shell security boundary.
+
+**Dependencies:** enabled configurations require the optional Tree-sitter parser packages `tree-sitter==0.25.1` and `tree-sitter-bash==0.25.1`. No CEL engine, custom compiled wheel, extra service or language runtime is required. The packages must be installed for the running Python/platform; the normal `off` mode does not import them. The dependency lock and Linux offline-bundle verification are separate release gates.
