@@ -1,62 +1,95 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Conservative routing rules: block precedence, partial coverage and OFF."""
+
+"""Structured YAML matcher tests, independent of optional Tree-sitter."""
 from __future__ import annotations
 
 import pytest
+
 from chrys.service.approval import prejudge_v2 as pj
 
 
-class Verdict:
-    def __init__(self, match): self.match = match
-    def type(self): return "BOOL"
-    def value(self): return self.match
-
-
-class Expression:
-    def __init__(self, test): self.test = test
-    def eval(self, *, data): return Verdict(self.test(data))
-
-
-def policy(*rules):
+def _policy(*rules: pj.Rule) -> pj.Policy:
     return pj.Policy("enforce", "pilot", tuple(rules))
 
 
-def command(argv, prefix=None):
-    return pj.CommandNode((0, 12), tuple(argv) if argv is not None else None,
-                          tuple(prefix if prefix is not None else (argv or ())), "")
+def _rule(rid: str, effect: pj.Route, field: pj.MatcherField, *tokens: str) -> pj.Rule:
+    return pj.Rule(rid, effect, pj.Matcher(field, tuple(tokens)))
 
 
-def test_block_precedes_allow(monkeypatch):
-    monkeypatch.setattr(pj, "analyze", lambda *a, **kw: pj.Analysis(
-        True, True, (command(["echo", "rm"]), command(["rm", "file"])), ()))
-    rules = policy(
-        pj.Rule("A-echo", pj.Route.ALLOW, Expression(lambda d: d["argv"][0] == "echo")),
-        pj.Rule("B-rm", pj.Route.BLOCK, Expression(lambda d: d["prefix"][0] == "rm")),
+def _command(argv: list[str] | None, prefix: list[str] | None = None) -> pj.CommandNode:
+    return pj.CommandNode(
+        (0, 12),
+        tuple(argv) if argv is not None else None,
+        tuple(prefix if prefix is not None else (argv or ())),
+        "",
     )
-    assert pj.route("echo rm; rm file", "bash", rules).route is pj.Route.BLOCK
 
 
-def test_unknown_requires_defer(monkeypatch):
-    monkeypatch.setattr(pj, "analyze", lambda *a, **kw: pj.Analysis(
-        True, True, (command(["git", "status"]), command(["unknown"])), ()))
-    rules = policy(pj.Rule("git", pj.Route.ALLOW, Expression(lambda d: d["argv"] == ["git", "status"])))
+def test_block_precedes_allow_and_targets_actual_executable(monkeypatch):
+    monkeypatch.setattr(
+        pj,
+        "analyze",
+        lambda *a, **kw: pj.Analysis(
+            True,
+            True,
+            (_command(["echo", "rm"]), _command(["rm", "file"])),
+            (),
+        ),
+    )
+    rules = _policy(
+        _rule("A-echo", pj.Route.ALLOW, "argv_first", "echo"),
+        _rule("B-rm", pj.Route.BLOCK, "prefix_first", "rm"),
+    )
+    result = pj.route("echo rm; rm file", "bash", rules)
+    assert result.route is pj.Route.BLOCK
+    assert result.matched_rule_ids[-1] == "B-rm"
+
+
+def test_unknown_command_must_defer(monkeypatch):
+    monkeypatch.setattr(
+        pj,
+        "analyze",
+        lambda *a, **kw: pj.Analysis(
+            True,
+            True,
+            (_command(["git", "status"]), _command(["unknown"])),
+            (),
+        ),
+    )
+    rules = _policy(_rule("status", pj.Route.ALLOW, "argv_exact", "git", "status"))
     assert pj.route("git status && unknown", "bash", rules).route is pj.Route.DEFER
 
 
-def test_dynamic_prefix_only_blocks(monkeypatch):
-    monkeypatch.setattr(pj, "analyze", lambda *a, **kw: pj.Analysis(
-        True, False, (command(None, ["rm"]),), ("dynamic_word",)))
-    a = pj.Rule("allow", pj.Route.ALLOW, Expression(lambda d: True))
-    b = pj.Rule("block", pj.Route.BLOCK, Expression(lambda d: d["prefix"] == ["rm"]))
-    assert pj.route('rm "$X"', "bash", policy(a)).route is pj.Route.DEFER
-    assert pj.route('rm "$X"', "bash", policy(b)).route is pj.Route.BLOCK
+def test_incomplete_argv_cannot_allow_but_static_head_can_block(monkeypatch):
+    monkeypatch.setattr(
+        pj,
+        "analyze",
+        lambda *a, **kw: pj.Analysis(True, False, (_command(None, ["rm"]),), ("dynamic_word",)),
+    )
+    allow = _rule("A", pj.Route.ALLOW, "argv_first", "rm")
+    block = _rule("B", pj.Route.BLOCK, "prefix_first", "rm")
+    assert pj.route('rm "$X"', "bash", _policy(allow)).route is pj.Route.DEFER
+    assert pj.route('rm "$X"', "bash", _policy(block)).route is pj.Route.BLOCK
 
 
-def test_unsupported_never_allows(monkeypatch):
-    monkeypatch.setattr(pj, "analyze", lambda *a, **kw: pj.Analysis(
-        True, False, (command(["echo", "ok"]),), ("command_substitution",)))
-    a = pj.Rule("allow", pj.Route.ALLOW, Expression(lambda d: True))
-    assert pj.route('echo "$(rm f)"', "bash", policy(a)).route is pj.Route.DEFER
+def test_quoted_dangerous_word_does_not_block(monkeypatch):
+    monkeypatch.setattr(
+        pj, "analyze",
+        lambda *a, **kw: pj.Analysis(True, True, (_command(["echo", "rm"]),), ()),
+    )
+    policy = _policy(_rule("B", pj.Route.BLOCK, "prefix_first", "rm"))
+    assert pj.route('echo "rm"', "bash", policy).route is pj.Route.DEFER
+
+
+def test_unsupported_syntax_never_auto_allows(monkeypatch):
+    monkeypatch.setattr(
+        pj, "analyze",
+        lambda *a, **kw: pj.Analysis(
+            True, False, (_command(["echo", "ok"]),), ("command_substitution",),
+        ),
+    )
+    rules = _policy(_rule("echo", pj.Route.ALLOW, "argv_first", "echo"))
+    assert pj.route('echo "$(rm f)"', "bash", rules).route is pj.Route.DEFER
 
 
 def test_off_and_missing_config(tmp_path):
@@ -64,26 +97,101 @@ def test_off_and_missing_config(tmp_path):
     assert pj.load_policy(tmp_path / "missing.yaml").mode == "off"
 
 
-@pytest.mark.parametrize("config", [
-    "schema_version: 1\nmode: off\npolicy_id: test\nrules: []",
-    'schema_version: 1\nmode: "enfroce"\npolicy_id: test\nrules: []',
-    'schema_version: 1\nmode: "off"\nunknown: true',
-])
+@pytest.mark.parametrize(
+    "match",
+    [
+        {},
+        {"argv_exact": []},
+        {"argv_exact": ["git", 3]},
+        {"argv_exact": "git status"},
+        {"argv_first": ["git", "status"]},
+        {"argv_first": []},
+        {"prefix_first": [""]},
+        {"argv_exact": ["git"], "argv_first": ["git"]},
+        {"unknown": ["git"]},
+        {"argv_exact": [True]},
+        {"argv_exact": [None]},
+    ],
+)
+def test_invalid_match_schema_fails_closed(match, tmp_path, monkeypatch):
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
+    path = tmp_path / "prejudge.yaml"
+    import yaml
+
+    path.write_text(
+        yaml.safe_dump({
+            "schema_version": 1,
+            "mode": "enforce",
+            "policy_id": "pilot",
+            "rules": [{"id": "A", "effect": "allow", "target": "command", "match": match}],
+        }),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        pj.load_policy(path)
+
+
+def test_prefix_match_cannot_allow(tmp_path, monkeypatch):
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
+    path = tmp_path / "prejudge.yaml"
+    path.write_text(
+        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
+        'rules:\n  - id: A\n    effect: allow\n    target: command\n'
+        '    match:\n      prefix_first: [git]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="cannot be used to ALLOW"):
+        pj.load_policy(path)
+
+
+def test_actual_yaml_rule_load_and_route(tmp_path, monkeypatch):
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
+    monkeypatch.setattr(
+        pj,
+        "analyze",
+        lambda *a, **kw: pj.Analysis(
+            True, True, (_command(["git", "status"]),), (),
+        ),
+    )
+    path = tmp_path / "prejudge.yaml"
+    path.write_text(
+        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
+        'rules:\n  - id: allow-status\n    effect: allow\n'
+        '    target: command\n    match:\n      argv_exact: [git, status]\n',
+        encoding="utf-8",
+    )
+    policy = pj.load_policy(path)
+    assert policy.rules[0].match.field == "argv_exact"
+    assert pj.route("git status", "bash", policy).route is pj.Route.ALLOW
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "schema_version: 1\nmode: off\npolicy_id: pilot\nrules: []",
+        'schema_version: 1\nmode: "enfroce"\npolicy_id: pilot\nrules: []',
+        'schema_version: 1\nmode: "off"\nunknown: true',
+        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
+        'rules:\n  - id: A\n    effect: allow\n    target: command\n'
+        '    when: \'argv == ["git"]\'',
+    ],
+)
 def test_invalid_config(tmp_path, config):
     file = tmp_path / "prejudge.yaml"
     file.write_text(config, encoding="utf-8")
     with pytest.raises(ValueError):
         pj.load_policy(file)
 
-def test_invalid_shadow_policy_disables_observation(tmp_path, monkeypatch):
+
+def test_shadow_invalid_policy_disables_observation(tmp_path, monkeypatch):
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
     file = tmp_path / "prejudge.yaml"
     file.write_text(
-        'schema_version: 1\nmode: "shadow"\npolicy_id: pilot\nrules: []',
+        'schema_version: 1\nmode: "shadow"\npolicy_id: pilot\n'
+        'rules:\n  - id: B\n    effect: block\n    target: command\n'
+        '    match:\n      unsupported: [rm]\n',
         encoding="utf-8",
     )
-    def bad_parser():
-        raise RuntimeError("tree-sitter not installed")
-    monkeypatch.setattr(pj, "_ensure_bash_parser", bad_parser)
     assert pj.load_policy(file).mode == "off"
 
 
@@ -93,8 +201,10 @@ def test_enforce_requires_parser_at_load(tmp_path, monkeypatch):
         'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\nrules: []',
         encoding="utf-8",
     )
+
     def bad_parser():
         raise RuntimeError("tree-sitter not installed")
+
     monkeypatch.setattr(pj, "_ensure_bash_parser", bad_parser)
     with pytest.raises(RuntimeError, match="tree-sitter"):
         pj.load_policy(file)
