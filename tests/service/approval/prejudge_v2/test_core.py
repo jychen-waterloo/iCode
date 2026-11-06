@@ -144,6 +144,19 @@ def test_prefix_match_cannot_allow(tmp_path, monkeypatch):
         pj.load_policy(path)
 
 
+def test_argv_first_block_is_rejected_at_policy_load(tmp_path, monkeypatch):
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
+    path = tmp_path / "prejudge.yaml"
+    path.write_text(
+        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
+        'rules:\n  - id: B\n    effect: block\n    target: command\n'
+        '    match:\n      argv_first: [rm]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="use prefix_first"):
+        pj.load_policy(path)
+
+
 def test_actual_yaml_rule_load_and_route(tmp_path, monkeypatch):
     monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
     monkeypatch.setattr(
@@ -171,9 +184,11 @@ def test_actual_yaml_rule_load_and_route(tmp_path, monkeypatch):
         "schema_version: 1\nmode: off\npolicy_id: pilot\nrules: []",
         'schema_version: 1\nmode: "enfroce"\npolicy_id: pilot\nrules: []',
         'schema_version: 1\nmode: "off"\nunknown: true',
-        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
-        'rules:\n  - id: A\n    effect: allow\n    target: command\n'
-        '    when: \'argv == ["git"]\'',
+        (
+            'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
+            'rules:\n  - id: A\n    effect: allow\n    target: command\n'
+            '    when: \'argv == ["git"]\''
+        ),
     ],
 )
 def test_invalid_config(tmp_path, config):

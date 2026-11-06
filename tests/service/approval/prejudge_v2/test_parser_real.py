@@ -90,6 +90,8 @@ def test_yaml_matchers_with_real_bash_ast(tmp_path):
         ('echo "$(rm fixture)"', Route.BLOCK),
         ('rm "$TARGET"', Route.BLOCK),
         ("git status > out.txt", Route.DEFER),
+        ("/bin/rm -rf fixture", Route.DEFER),
+        ("command rm fixture", Route.DEFER),
     )
     for command, expected in cases:
         result = route(command, "bash", policy)

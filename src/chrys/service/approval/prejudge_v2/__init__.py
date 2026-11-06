@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from yaml.resolver import BaseResolver
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode) 
 
 
 _UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    BaseResolver.DEFAULT_MAPPING_TAG,
     _construct_unique_mapping,
 )
 
@@ -251,6 +252,8 @@ def _compile_matcher(raw: object, *, effect: Route) -> Matcher:
         raise ValueError(f"Matcher {field} requires exactly one token")
     if field == "prefix_first" and effect is Route.ALLOW:
         raise ValueError("prefix_first cannot be used to ALLOW incomplete commands")
+    if field == "argv_first" and effect is Route.BLOCK:
+        raise ValueError("argv_first cannot BLOCK dynamic arguments; use prefix_first")
     return Matcher(field, tuple(tokens))
 
 
@@ -293,7 +296,8 @@ def load_policy(path: Path) -> Policy:
         return Policy("off", "", ())
     content: Any = None
     try:
-        content = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
+        # _UniqueKeyLoader derives from SafeLoader and rejects duplicate keys.
+        content = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)  # noqa: S506
         if not isinstance(content, dict) or set(content) - {
             "schema_version", "mode", "policy_id", "rules"
         }:
