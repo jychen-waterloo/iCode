@@ -183,6 +183,20 @@ def test_invalid_config(tmp_path, config):
         pj.load_policy(file)
 
 
+def test_duplicate_yaml_match_key_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
+    file = tmp_path / "prejudge.yaml"
+    file.write_text(
+        'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
+        'rules:\n  - id: A\n    effect: allow\n    target: command\n'
+        '    match:\n      argv_exact: [git, status]\n'
+        '      argv_exact: [rm]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Duplicate YAML policy key"):
+        pj.load_policy(file)
+
+
 def test_shadow_invalid_policy_disables_observation(tmp_path, monkeypatch):
     monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
     file = tmp_path / "prejudge.yaml"
