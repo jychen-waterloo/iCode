@@ -4,12 +4,8 @@
 
 A handful of settings are consumed by code that has no engine, no session and
 no ``Settings`` in reach: an import-time module constant, a probe cached behind
-a process lock, a TUI helper called from a widget. They read ``os.environ``
-directly today, which works only because bootstrap injects every ``CHRYS_*``
-into it. Once the dotenv layers stop being injected, those readers go blind —
-so they need a source that is neither the environment nor a per-session object.
-
-That source is this module: one snapshot, written once by the entrypoint
+a process lock, a TUI helper called from a widget. Their settings come from
+this module: one snapshot, written once by the entrypoint
 bootstrap, read by everyone else. It carries **only** fields declared
 ``Apply.RESTART``, which is the same statement from the other side — a value
 that a restart is required to change is exactly a value a process snapshot can
@@ -46,6 +42,7 @@ class ProcessSettings:
     mutation_trace_mode: str
     mutation_trace_fsatrace_path: str
     session_root_dir: str
+    credential_command_ttl_seconds: int
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ProcessSettings:
@@ -57,6 +54,7 @@ class ProcessSettings:
             mutation_trace_mode=settings.mutation_trace_mode,
             mutation_trace_fsatrace_path=settings.mutation_trace_fsatrace_path,
             session_root_dir=settings.session_root_dir,
+            credential_command_ttl_seconds=settings.credential_command_ttl_seconds,
         )
 
 

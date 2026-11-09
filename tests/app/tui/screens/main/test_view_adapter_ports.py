@@ -83,7 +83,7 @@ async def test_main_view_status_callers_preserve_message_refs_for_live_retransla
         async def prepare_retry(self) -> None:
             return
 
-        async def add_retry(self, *_args: object) -> None:
+        async def add_retry(self, *_args: object, deadline: float | None = None, wait_id: str = "") -> None:
             return
 
     class _Terminal:
@@ -148,7 +148,7 @@ async def test_main_view_status_callers_preserve_message_refs_for_live_retransla
         assert screen.terminal_title_result == "✓"
         assert status_bar._flash is not None
         assert isinstance(status_bar._flash.text, MessageRef)
-        assert status_bar.query_one("#status-flash", Static).render().plain.startswith("已在 ")
+        assert status_bar.query_one("#status-flash", Static).render().plain.startswith("已完成")
 
         adapter.flash_status(status_bar._flash.text, error=True)
         adapter.mark_terminal_title_failed()

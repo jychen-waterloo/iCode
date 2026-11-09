@@ -46,7 +46,7 @@ from tests.support.tui_helpers import (
 from tests.support.waiting import wait_for
 
 # Tests here call register_kind_renderer(KIND_SUB_AGENT, ...) directly; undo it per test.
-pytestmark = pytest.mark.usefixtures("restore_kind_renderer_registry")
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap", "restore_kind_renderer_registry")
 
 
 async def test_replay_history_defers_tool_renderer_creation_until_expand(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,7 +103,7 @@ async def test_replay_history_defers_tool_renderer_creation_until_expand(monkeyp
         assert group._tool_records["tool1#0"].duration_known is True
         expected_tool_timestamp = format_message_created_at("2026-08-19T01:02:03+00:00")
         assert group._tool_records["tool1#0"].timestamp == expected_tool_timestamp
-        assert group.query_one(ToolGroupTitle).render().plain == "▸ Made 1 other call"
+        assert group.query_one(ToolGroupTitle).render().plain == "▸ Called plain_tool"
 
         group.collapsed = False
         await wait_for(lambda: created, pilot=pilot, description="created")

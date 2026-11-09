@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 import subprocess
@@ -12,6 +13,7 @@ import sys
 import textwrap
 from types import ModuleType, SimpleNamespace
 from typing import Any
+from unittest.mock import create_autospec
 
 import pytest
 
@@ -30,6 +32,8 @@ from chrys.foundation.platform.process import (
     wait_for_subprocess,
     windows_hidden_subprocess_kwargs,
 )
+from tests.support.processes import still_running
+from tests.support.stopped_child import STOPS_ITSELF
 from tests.support.waiting import ENGINE_TURN_TIMEOUT, wait_for
 
 
@@ -501,11 +505,15 @@ async def test_windows_managed_job_terminates_surviving_descendant(tmp_path) -> 
 
 
 def _refuse_the_job_attribute(
-    attempts: list[tuple[int, ...]], *, error: int, refused_jobs: list[int] | None = None
+    attempts: list[tuple[int, ...]],
+    *,
+    error: int,
+    refused_jobs: list[int] | None = None,
+    denials: int = 1,
 ) -> Any:
-    """A ``_windows_create_process`` that fails its first call with *error*, then creates for real.
+    """A ``_windows_create_process`` that fails its first *denials* calls with *error*, then creates for real.
 
-    *refused_jobs* collects the job the refused call named.
+    *refused_jobs* collects the job each refused call named.
     """
     real_create = process_mod._windows_create_process
 
@@ -522,7 +530,7 @@ def _refuse_the_job_attribute(
         process_info: Any,
     ) -> int | None:
         attempts.append(tuple(attribute for attribute, _value, _failure in attributes))
-        if len(attempts) == 1:
+        if len(attempts) <= denials:
             if refused_jobs is not None:
                 refused_jobs.extend(
                     int(value[0])
@@ -548,9 +556,156 @@ def _refuse_the_job_attribute(
 _JOB_AND_HANDLES = (process_mod._PROC_THREAD_ATTRIBUTE_JOB_LIST, process_mod._PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
 
 
+@pytest.mark.parametrize(
+    ("error", "retries"),
+    [
+        pytest.param(5, True, id="win32-access-denied"),
+        pytest.param(0xC0070005, True, id="ntstatus-unsigned-access-denied"),
+        pytest.param(-1073283067, True, id="ntstatus-signed-access-denied"),
+        pytest.param(2, False, id="file-not-found"),
+        pytest.param(87, False, id="invalid-parameter"),
+        pytest.param(-1073741819, False, id="access-violation-same-low-word"),
+    ],
+)
+async def test_windows_spawn_access_denied_fallback_preserves_retry_failure(
+    monkeypatch: pytest.MonkeyPatch, error: int, retries: bool
+) -> None:
+    api = SimpleNamespace(kernel32=SimpleNamespace(SetHandleInformation=lambda handle, mask, flags: 1))
+    retry_error = 87
+    create = create_autospec(process_mod._windows_create_process, side_effect=[error, retry_error])
+    create_job = create_autospec(process_mod._windows_create_job, side_effect=[101, 102])
+    closed: list[int | None] = []
+    monkeypatch.setattr(process_mod, "_windows_process_api", lambda: api)
+    monkeypatch.setattr(process_mod, "_windows_create_job", create_job)
+    monkeypatch.setattr(process_mod, "_make_windows_pipe_pairs", lambda: ((11, 12), (21, 22), (31, 32)))
+    monkeypatch.setattr(process_mod, "_windows_create_process", create)
+    monkeypatch.setattr(process_mod, "_close_windows_handle", closed.append)
+
+    # Every create fails before it can return a process handle; no fake handle reaches an OS wait.
+    with pytest.raises(OSError) as raised:
+        await process_mod._spawn_windows_managed_stdio_process(
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell\pwsh.exe",
+            ("-NoProfile", "-Command", "Write-Output ok"),
+            cwd="C:\\",
+            env={},
+            limit=64 * 1024,
+            parent_env=None,
+        )
+
+    first = create.call_args_list[0].kwargs
+    assert tuple(attribute for attribute, _value, _failure in first["attributes"]) == _JOB_AND_HANDLES
+    assert not first["flags"] & process_mod._CREATE_SUSPENDED
+    assert create.call_count == (2 if retries else 1)
+    assert create_job.call_count == (2 if retries else 1)
+    assert raised.value.strerror == (
+        "Unable to create the Windows subprocess even without the Job Object attribute."
+        if retries
+        else "Unable to create the Windows subprocess."
+    )
+    reported_error = raised.value.winerror if sys.platform == "win32" else raised.value.errno
+    assert reported_error == (retry_error if retries else error)
+    if retries:
+        second = create.call_args_list[1].kwargs
+        assert second["flags"] == first["flags"] | process_mod._CREATE_SUSPENDED
+        assert second["attributes"] == (first["attributes"][1],)
+        assert [handle for handle in closed if handle is not None] == [101, 102, 11, 12, 21, 22, 31, 32]
+    else:
+        assert [handle for handle in closed if handle is not None] == [101, 11, 12, 21, 22, 31, 32]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process creation only")
+async def test_windows_spawn_denial_that_outlives_the_fallback_is_retried(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    kernel32 = _test_kernel32()
+    attempts: list[tuple[int, ...]] = []
+    monkeypatch.setattr(
+        process_mod,
+        "_windows_create_process",
+        # A transient denial (an antivirus holding the executable for a first-run scan) refuses
+        # the whole first sequence, then lifts before the retry's first create.
+        _refuse_the_job_attribute(attempts, error=process_mod._ERROR_ACCESS_DENIED, denials=2),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chrys.foundation.platform.process"):
+        process = await spawn_managed_stdio_process(
+            sys.executable,
+            "-c",
+            _PARENT_OF_A_SLEEPER,
+            cwd=str(tmp_path),
+            env=dict(os.environ),
+            limit=64 * 1024,
+        )
+    # The retry is logged with its error code, attempt and wait, so real denials can tune the waits.
+    assert "with error 0x5; retry 1 of 2 after 0.25 s" in caplog.text
+
+    assert attempts == [
+        _JOB_AND_HANDLES,
+        (process_mod._PROC_THREAD_ATTRIBUTE_HANDLE_LIST,),
+        _JOB_AND_HANDLES,
+    ]
+    await _assert_job_ends_the_sleeper(process, kernel32)
+
+
+async def test_windows_spawn_denial_retries_run_out_with_every_handle_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = SimpleNamespace(kernel32=SimpleNamespace(SetHandleInformation=lambda handle, mask, flags: 1))
+    sequences = 1 + len(process_mod._WINDOWS_SPAWN_DENIAL_BACKOFF_SECONDS)
+    create = create_autospec(
+        process_mod._windows_create_process, side_effect=[process_mod._ERROR_ACCESS_DENIED] * (2 * sequences)
+    )
+    create_job = create_autospec(process_mod._windows_create_job, side_effect=[101, 102, 103, 104])
+    sleeps: list[float] = []
+    shadow = ModuleType("asyncio")
+    shadow.__dict__.update(vars(asyncio))
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    shadow.sleep = sleep
+    closed: list[int | None] = []
+    monkeypatch.setattr(process_mod, "asyncio", shadow)
+    monkeypatch.setattr(process_mod, "_windows_process_api", lambda: api)
+    monkeypatch.setattr(process_mod, "_windows_create_job", create_job)
+    monkeypatch.setattr(process_mod, "_make_windows_pipe_pairs", lambda: ((11, 12), (21, 22), (31, 32)))
+    monkeypatch.setattr(process_mod, "_windows_create_process", create)
+    monkeypatch.setattr(process_mod, "_close_windows_handle", closed.append)
+
+    with pytest.raises(OSError) as raised:
+        await process_mod._spawn_windows_managed_stdio_process(
+            r"C:\Program Files\WindowsApps\Microsoft.PowerShell\pwsh.exe",
+            ("-NoProfile", "-Command", "Write-Output ok"),
+            cwd="C:\\",
+            env={},
+            limit=64 * 1024,
+            parent_env=None,
+        )
+
+    assert sleeps == list(process_mod._WINDOWS_SPAWN_DENIAL_BACKOFF_SECONDS)
+    assert raised.value.strerror == "Unable to create the Windows subprocess even without the Job Object attribute."
+    reported_error = raised.value.winerror if sys.platform == "win32" else raised.value.errno
+    assert reported_error == process_mod._ERROR_ACCESS_DENIED
+    # Every sequence redid the full dance: job and handles, then handles only and suspended.
+    for sequence in range(sequences):
+        first = create.call_args_list[2 * sequence].kwargs
+        second = create.call_args_list[2 * sequence + 1].kwargs
+        assert tuple(attribute for attribute, _value, _failure in first["attributes"]) == _JOB_AND_HANDLES
+        assert not first["flags"] & process_mod._CREATE_SUSPENDED
+        # Each sequence's first create attaches the fresh empty job the previous denial left behind:
+        # building the attribute inside the loop is what keeps a reused refused job from being pinned.
+        assert int(first["attributes"][0][1][0]) == 101 + sequence
+        assert second["flags"] == first["flags"] | process_mod._CREATE_SUSPENDED
+        assert second["attributes"] == (first["attributes"][1],)
+    # Each fallback's refused job closed when it was replaced; the last job the failure cleanup took.
+    assert [handle for handle in closed if handle is not None] == [101, 102, 103, 104, 11, 12, 21, 22, 31, 32]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Objects only")
+# ctypes reports CreateProcessW's last error signed, so the NTSTATUS case is negative.
+@pytest.mark.parametrize("error", [5, -1073283067], ids=["win32", "ntstatus"])
 async def test_windows_child_refused_the_job_attribute_runs_only_once_its_job_holds_it(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, error: int
 ) -> None:
     import ctypes
 
@@ -586,11 +741,11 @@ async def test_windows_child_refused_the_job_attribute_runs_only_once_its_job_ho
         suspend_counts.append(real_resume(thread))
         return suspend_counts[-1]
 
-    # Windows answers ERROR_ACCESS_DENIED for a packaged (MSIX) executable, such as PowerShell from the Store.
+    # Denies the job attribute as `error`, as a packaged (MSIX) executable such as Store PowerShell may be refused.
     monkeypatch.setattr(
         process_mod,
         "_windows_create_process",
-        _refuse_the_job_attribute(attempts, error=process_mod._ERROR_ACCESS_DENIED, refused_jobs=refused_jobs),
+        _refuse_the_job_attribute(attempts, error=error, refused_jobs=refused_jobs),
     )
     monkeypatch.setattr(process_mod, "_close_windows_handle", close)
     monkeypatch.setattr(spawn_api.kernel32, "AssignProcessToJobObject", assign)
@@ -861,18 +1016,13 @@ async def test_file_not_found_propagates():
 @pytest.mark.asyncio
 async def test_timeout_kills_stopped_grandchild_holding_pipe():
     """Cleanup kills the whole process group even after the wrapper exits."""
+    child = "import os; print(os.getpid(), flush=True); " + STOPS_ITSELF
     script = textwrap.dedent(
-        """
-        import os
-        import signal
+        f"""
         import subprocess
         import sys
 
-        subprocess.Popen([
-            sys.executable,
-            "-c",
-            "import os, signal, time; print(os.getpid(), flush=True); os.kill(os.getpid(), signal.SIGSTOP); time.sleep(30)",
-        ])
+        subprocess.Popen([sys.executable, "-c", {child!r}])
         """
     )
 
@@ -1013,3 +1163,213 @@ async def test_windows_process_wait_registers_with_the_running_loops_completion_
     _stub_running_loop(monkeypatch, SimpleNamespace(_proactor=SimpleNamespace(wait_for_handle=wait_for_handle)))
     assert process_mod._register_windows_process_wait(111) is waiter
     assert registered == [111]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+async def test_a_start_that_finishes_as_its_wait_times_out_still_has_its_tree_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bounded wait reports a timeout, but the start finished meanwhile: its tree is ended, not left running."""
+    import psutil
+
+    real_spawn = asyncio.create_subprocess_exec
+    started: list[asyncio.subprocess.Process] = []
+    connected = asyncio.Event()
+
+    async def slow_to_connect(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        proc = await real_spawn(*args, **kwargs)
+        started.append(proc)
+        await connected.wait()
+        return proc
+
+    async def times_out_as_the_start_finishes(
+        futures: set[asyncio.Future[Any]], *, timeout: float
+    ) -> tuple[set[asyncio.Future[Any]], set[asyncio.Future[Any]]]:
+        # The timer fires in the same turn the start completes: the wait still says nothing finished.
+        connected.set()
+        (spawn,) = futures
+        await asyncio.wait({spawn})
+        return set(), set(futures)
+
+    shadow = ModuleType("asyncio")
+    shadow.__dict__.update(vars(asyncio), create_subprocess_exec=slow_to_connect, wait=times_out_as_the_start_finishes)
+    monkeypatch.setattr(process_mod, "asyncio", shadow)
+
+    async def run() -> None:
+        async with managed_subprocess("/bin/sh", "-c", "sleep 30; echo done", stdout=asyncio.subprocess.PIPE):
+            pass
+
+    task = asyncio.create_task(run())
+    await wait_for(lambda: bool(started) or task.done(), timeout=ENGINE_TURN_TIMEOUT, description="child running")
+    assert not task.done()
+    shell = psutil.Process(started[0].pid)
+    await wait_for(lambda: bool(shell.children()), timeout=ENGINE_TURN_TIMEOUT, description="the shell ran its sleep")
+    processes = [shell, *shell.children(recursive=True)]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, ENGINE_TURN_TIMEOUT)
+
+    def gone() -> bool:
+        return not any(still_running(process) for process in processes)
+
+    await wait_for(gone, timeout=ENGINE_TURN_TIMEOUT, description="the shell and its sleep ended")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+async def test_a_start_finishing_after_its_cancel_went_on_still_has_its_tree_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cancel does not wait for a slow start, and the start is not cut short: its whole tree ends once it is up."""
+    import psutil
+
+    monkeypatch.setattr(process_mod, "_PROCESS_WAIT_CLEANUP_TIMEOUT", 0.2)
+    real_spawn = asyncio.create_subprocess_exec
+    started: list[asyncio.subprocess.Process] = []
+    connected = asyncio.Event()
+    spawns: list[asyncio.Future[Any]] = []
+
+    async def slow_to_connect(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        proc = await real_spawn(*args, **kwargs)
+        started.append(proc)
+        await connected.wait()
+        return proc
+
+    real_ensure_future = asyncio.ensure_future
+
+    def recording_ensure_future(awaitable: Any) -> asyncio.Future[Any]:
+        future = real_ensure_future(awaitable)
+        spawns.append(future)
+        return future
+
+    shadow = ModuleType("asyncio")
+    shadow.__dict__.update(vars(asyncio), create_subprocess_exec=slow_to_connect, ensure_future=recording_ensure_future)
+    monkeypatch.setattr(process_mod, "asyncio", shadow)
+
+    async def run() -> None:
+        async with managed_subprocess("/bin/sh", "-c", "sleep 30; echo done", stdout=asyncio.subprocess.PIPE):
+            pass
+
+    task = asyncio.create_task(run())
+    await wait_for(lambda: bool(started) or task.done(), timeout=ENGINE_TURN_TIMEOUT, description="child running")
+    assert not task.done()
+    shell = psutil.Process(started[0].pid)
+    await wait_for(lambda: bool(shell.children()), timeout=ENGINE_TURN_TIMEOUT, description="the shell ran its sleep")
+    processes = [shell, *shell.children(recursive=True)]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, ENGINE_TURN_TIMEOUT)
+    # The cancel went on while the start was still connecting, which was left to finish.
+    (spawn,) = spawns
+    assert not spawn.done()
+    assert all(still_running(process) for process in processes)
+
+    connected.set()
+
+    def gone() -> bool:
+        return not any(still_running(process) for process in processes)
+
+    await wait_for(gone, timeout=ENGINE_TURN_TIMEOUT, description="the shell and its sleep ended")
+    assert not spawn.cancelled()
+    await wait_for(lambda: not process_mod._LATE_CHILD_ENDINGS, timeout=ENGINE_TURN_TIMEOUT, description="ending done")
+
+
+@pytest.mark.parametrize("starter", ["managed_subprocess", "spawn_managed_stdio_process"])
+async def test_a_cancel_ends_even_when_the_start_never_finishes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, starter: str
+) -> None:
+    """A start stuck for good (a stalled network disk) cannot hold a cancel, and is given up after a grace."""
+    monkeypatch.setattr(process_mod, "_PROCESS_WAIT_CLEANUP_TIMEOUT", 0.2)
+    monkeypatch.setattr(process_mod, "_LATE_START_GRACE", 0.2)
+    entered = asyncio.Event()
+    abandoned = asyncio.Event()
+
+    async def never_starts(*_args: Any, **_kwargs: Any) -> asyncio.subprocess.Process:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
+        raise AssertionError("unreachable")
+
+    _stub_subprocess_spawn(monkeypatch, never_starts)
+    if starter == "spawn_managed_stdio_process" and sys.platform == "win32":
+        pytest.skip("the Windows stdio spawn does not start through create_subprocess_exec")
+
+    async def run() -> None:
+        if starter == "managed_subprocess":
+            async with managed_subprocess("cmd", stdout=asyncio.subprocess.PIPE):
+                pass
+        else:
+            await spawn_managed_stdio_process("cmd", cwd=str(tmp_path), env=dict(os.environ), limit=64 * 1024)
+
+    task = asyncio.create_task(run())
+    await wait_for(lambda: entered.is_set() or task.done(), timeout=ENGINE_TURN_TIMEOUT, description="start entered")
+    assert not task.done()
+
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, ENGINE_TURN_TIMEOUT)
+    await wait_for(abandoned.is_set, timeout=ENGINE_TURN_TIMEOUT, description="the stuck start was cancelled")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups only")
+@pytest.mark.parametrize("cancels", [1, 2], ids=["one-cancel", "a-second-cancel"])
+@pytest.mark.parametrize("starter", ["managed_subprocess", "spawn_managed_stdio_process"])
+async def test_a_cancel_while_the_child_starts_ends_everything_it_started(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, starter: str, cancels: int
+) -> None:
+    """``create_subprocess_exec`` returns after the child already runs: a cancel in that gap still ends its tree.
+
+    A second cancel while that ending waits for the start does not cut it short.
+    """
+    import psutil
+
+    real_spawn = asyncio.create_subprocess_exec
+    started: list[asyncio.subprocess.Process] = []
+    connected = asyncio.Event()
+
+    async def slow_to_connect(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        proc = await real_spawn(*args, **kwargs)
+        started.append(proc)
+        # The child runs; its start has not returned yet.
+        await connected.wait()
+        return proc
+
+    _stub_subprocess_spawn(monkeypatch, slow_to_connect)
+
+    async def run() -> None:
+        if starter == "managed_subprocess":
+            async with managed_subprocess("/bin/sh", "-c", "sleep 30; echo done", stdout=asyncio.subprocess.PIPE):
+                pass
+        else:
+            process = await spawn_managed_stdio_process(
+                "/bin/sh", "-c", "sleep 30; echo done", cwd=str(tmp_path), env=dict(os.environ), limit=64 * 1024
+            )
+            process.close_transports()
+
+    task = asyncio.create_task(run())
+    await wait_for(lambda: bool(started) or task.done(), timeout=ENGINE_TURN_TIMEOUT, description="child running")
+    assert not task.done()
+    shell = psutil.Process(started[0].pid)
+    await wait_for(lambda: bool(shell.children()), timeout=ENGINE_TURN_TIMEOUT, description="the shell ran its sleep")
+    processes = [shell, *shell.children(recursive=True)]
+
+    task.cancel()
+    # Lets the cancel land while the start is still held.
+    await asyncio.sleep(0)
+    if cancels == 2:
+        task.cancel()
+        await asyncio.sleep(0)
+    assert not task.done()
+    connected.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, ENGINE_TURN_TIMEOUT)
+
+    def gone() -> bool:
+        return not any(still_running(process) for process in processes)
+
+    await wait_for(gone, timeout=ENGINE_TURN_TIMEOUT, description="the shell and its sleep ended")

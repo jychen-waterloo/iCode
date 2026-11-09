@@ -359,7 +359,10 @@ App:ansi ErrorMessage > .status-action-row > Button:focus,
 App:ansi ErrorMessage > .status-action-row > Button.-active,
 App:ansi InterruptedMessage > .status-action-row > Button:hover,
 App:ansi InterruptedMessage > .status-action-row > Button:focus,
-App:ansi InterruptedMessage > .status-action-row > Button.-active {
+App:ansi InterruptedMessage > .status-action-row > Button.-active,
+App:ansi RetryMessage > .retry-countdown-row > Button:hover,
+App:ansi RetryMessage > .retry-countdown-row > Button:focus,
+App:ansi RetryMessage > .retry-countdown-row > Button.-active {
     color: $button-color-foreground;
 }
 App:ansi StatusBar .model-tag:hover,
@@ -387,7 +390,7 @@ App:ansi #approval-reason .text-area--placeholder {
     color: $foreground-muted;
 }
 
-App:ansi ConversationToc > .toc-empty,
+App:ansi ConversationToc .toc-empty,
 App:ansi TasksPanel #tasks-empty,
 App:ansi BackgroundTaskList > #background-tasks-empty,
 App:ansi BuddyPanel .buddy-empty {
@@ -434,12 +437,8 @@ App:ansi DataTable {
     background: transparent;
 }
 
-/* ANSI card surfaces and checkbox toggles. */
-App:ansi SubAgentCard,
-App:ansi MCPConnectionCard,
-App:ansi SkillDirCard,
-App:ansi MemoryFileCard,
-App:ansi MemoryFolderCard {
+/* ANSI card surfaces and checkbox toggles: every config card, whichever dialog shows it. */
+App:ansi ConfigCard {
     background: $control-background-muted;
     border: solid $tui-border-foreground 25%;
 }

@@ -5,11 +5,11 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import inspect
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from contextlib import ExitStack
 from functools import partial
+from pathlib import Path
 
 import pytest
 from textual import events
@@ -18,18 +18,22 @@ from textual.widget import AwaitMount, Widget
 from chrys.app.tui.widgets.chat.messages import AgentMessage, ErrorMessage, ThinkingMessage, UserMessage
 from chrys.app.tui.widgets.chat.panel import ChatPanel
 from chrys.app.tui.widgets.chat.replay_mount import REPLAY_MOUNT_BATCH_SIZE
-from chrys.app.tui.widgets.chat.tool_call import ToolGroup
+from chrys.app.tui.widgets.chat.tool_call import ToolGroup, ToolGroupTitle
 from chrys.app.tui.widgets.markdown.widget import VirtualizedMarkdown
 from chrys.app.tui.widgets.welcome import WelcomeWidget
 from chrys.foundation.models.history_markers import ANSWER_SEGMENT_KEY
+from chrys.foundation.tool_kinds import KIND_FILESYSTEM_READ, TOOL_CALL_KIND_METADATA_KEY
 from chrys.kernel import Content
 from tests.app.tui.widgets._scroll_gc import install_fake_chat_panel_gc
 from tests.support.tui_helpers import (
     ChatPanelApp,
     _simulate_chat_panel_user_scroll_y,
     chat_content_children,
+    title_text,
 )
 from tests.support.waiting import DEFAULT_WAIT_TIMEOUT, wait_for, wait_until, wait_until_quiet
+
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
 
 # At _SIZE either history replays as a tail batch and two prepend batches,
 # so the first and the last prepended batch differ.
@@ -129,21 +133,6 @@ def _hold_refresh_callbacks(
 
     monkeypatch.setattr(controller, "_after_batch_mounted", hold_refresh_callbacks)
     return queued
-
-
-@pytest.fixture(autouse=True)
-def freeze_earlier_tests_heap() -> Iterator[None]:
-    """Keep what earlier tests in this worker left alive out of the replay's closing collection.
-
-    A prepend ends its GC pause with one full ``gc.collect()``, inside the
-    budget of :func:`_wait_complete`. That pass walks every tracked object in
-    the process, so its cost grows with the worker's whole history, not with
-    this replay: seconds on a loaded runner. Frozen, that heap is skipped and
-    the pass walks only what this test allocated.
-    """
-    gc.freeze()
-    yield
-    gc.unfreeze()
 
 
 async def _wait_complete(panel: ChatPanel) -> None:
@@ -922,6 +911,34 @@ async def test_fold_all_while_the_last_batch_mounts_outlasts_the_choice_before_i
         assert [group.collapsed for group in cp.query(ToolGroup)] == [True] * _TOOL_TURNS
 
 
+async def test_a_folder_change_during_prepend_reaches_tool_groups_mounted_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Each turn's group read one file in the chat's folder, so its row names that file relative to the folder.
+    folder = Path(Path(__file__).anchor, "work")
+    messages = _turns(_TOOL_TURNS, with_tools=True)
+    calls = [content for message in messages for content in message["contents"] if content["type"] == "function_call"]
+    for index, call in enumerate(calls):
+        call["arguments"] = {"path": str(folder / f"file_{index}.py")}
+        call["additional_properties"] = {TOOL_CALL_KIND_METADATA_KEY: KIND_FILESYSTEM_READ}
+    async with ChatPanelApp().run_test(size=_SIZE) as pilot:
+        cp = pilot.app.query_one(ChatPanel)
+        cp.set_workspace_cwd(str(folder))
+        gate = _PrependGate(cp, monkeypatch)
+        await cp.replay_history(messages)
+        await gate.wait_held(pilot)
+        assert any(isinstance(widget, ToolGroup) for widget in cp.pending_transcript_widgets())
+
+        # The chat moves to another folder while older history waits to mount: the files lie outside it now. Mounted
+        # rows name them anew, and the rows still to mount read the folder as they mount, not as replay planned them.
+        cp.set_workspace_cwd(str(folder.parent / "elsewhere"))
+        gate.release.set()
+        await _wait_complete(cp)
+
+        titles = [title_text(group.query_one(ToolGroupTitle))[2:] for group in cp.query(ToolGroup)]
+        assert titles == [f"Read {folder / f'file_{index}.py'}" for index in range(_TOOL_TURNS)]
+
+
 async def test_a_withdrawal_mid_prepend_waits_for_the_replay_then_removes_each_answer_it_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -945,3 +962,47 @@ async def test_a_withdrawal_mid_prepend_waits_for_the_replay_then_removes_each_a
 
         withdrawn = {"answer 0\n\nmore about 0", f"answer {_TURNS - 1}\n\nmore about {_TURNS - 1}"}
         assert _message_texts(cp) == [text for _, text in _expected_messages() if text not in withdrawn]
+
+
+async def test_retirement_mid_prepend_waits_and_removes_the_whole_failed_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from chrys.foundation.models.history_markers import HistoryMarkerKind
+    from chrys.kernel import Message
+
+    messages = [Message("user", ["Retired opener"]).to_dict()]
+    for index in range(90):
+        messages.append(
+            Message(
+                "user",
+                [f"Unanswered note {index}"],
+                additional_properties={HistoryMarkerKind.INJECTED_KEY: True},
+            ).to_dict()
+        )
+    messages.append(
+        Message(
+            "assistant", ["Stopped"], additional_properties={HistoryMarkerKind.KEY: HistoryMarkerKind.INTERRUPTED}
+        ).to_dict()
+    )
+    async with ChatPanelApp().run_test(size=_SIZE) as pilot:
+        cp = pilot.app.query_one(ChatPanel)
+        gate = _PrependGate(cp, monkeypatch)
+        cleanup = None
+        try:
+            await cp.replay_history(messages)
+            await gate.wait_held(pilot)
+            assert not any(message.text == "Retired opener" for message in cp.query(UserMessage))
+            await cp.add_user_message("Replacement")
+            cleanup = asyncio.create_task(cp.apply_fresh_turn_cleanup(retired_previous_turn=True, removed_item_ids=()))
+            await asyncio.sleep(0)
+            assert not cleanup.done()
+            gate.release.set()
+            await asyncio.wait_for(cleanup, timeout=DEFAULT_WAIT_TIMEOUT)
+            cp.apply_turn_started(1)
+            assert [message.text for message in cp.query(UserMessage)] == ["Replacement"]
+            assert [(item.summary, item.turn_index) for item in cp.toc_items] == [("Replacement", 1)]
+        finally:
+            gate.release.set()
+            if cleanup is not None:
+                await cleanup
+            await cp.wait_replay_complete()

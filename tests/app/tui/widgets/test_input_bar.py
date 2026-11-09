@@ -21,6 +21,7 @@ from chrys.app.tui.screens.main.state import MainScreenState
 from chrys.app.tui.screens.main.view_adapter import MainScreenViewAdapter
 from chrys.app.tui.widgets.chat.panel import ChatPanel
 from chrys.app.tui.widgets.chrome import input_bar as input_bar_module
+from chrys.app.tui.widgets.chrome.file_scanner import ProjectPathScanResult
 from chrys.app.tui.widgets.chrome.input_bar import (
     INPUT_RETRY,
     INPUT_SEND,
@@ -601,7 +602,9 @@ async def test_main_screen_reactive_sources_apply_existing_side_effects() -> Non
     async with app.run_test() as pilot:
         await pilot.pause()
         input_bar = app.main_screen.query_one(InputBar)
-        app.main_screen._suggestions.file_cache = {"stale": object()}
+        suggestions = app.main_screen._suggestions
+        file_index = suggestions._file_index_for(suggestions._current_file_root())
+        file_index.install(ProjectPathScanResult.from_suggestions(root=file_index.root, paths=[]))
         app.main_screen._live_diff.call_paths["call"] = "src/app.py"
         app.main_screen._live_diff.file_mutations["src/app.py"] = object()
 
@@ -621,7 +624,7 @@ async def test_main_screen_reactive_sources_apply_existing_side_effects() -> Non
         assert app.main_screen._state.run.agent_running is False
         assert app.main_screen._state.run.agent_loading is False
         assert app.main_screen._state.run.has_messages is True
-        assert app.main_screen._suggestions.file_cache is None
+        assert file_index.stale is True
         assert input_bar.locked is False
 
 
@@ -1111,6 +1114,27 @@ async def test_restore_input_text_hands_back_a_refused_queued_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_queued_message_with_labels_is_still_the_message_its_sent_text_names() -> None:
+    """The composer holds labels and the hand-back holds what they sent: the same message, labels kept."""
+    async with _InputBarApp().run_test(size=(120, 15)) as pilot:
+        input_bar = pilot.app.query_one(InputBar)
+        text_area = input_bar.query_one("#chat-input", _ChatTextArea)
+        adapter = _draft_restore_adapter(input_bar)
+        text_area.focus()
+        text_area.insert("explain")
+        assert input_bar.insert_reference("quote", "it failed")
+        sent = input_bar.draft().sent_text()
+        input_bar.lock_with_text()
+
+        restore = adapter.restore_input_text(sent)
+
+        assert restore is not None
+        assert not input_bar.locked
+        assert input_bar.value == "explain [Quote #1] "
+        assert input_bar.draft().sent_text() == sent == "explain \n> it failed"
+
+
+@pytest.mark.asyncio
 async def test_restore_input_text_unlocks_before_deferring_to_a_live_draft() -> None:
     """Abandoned injections still unlock the bar even when the restore is skipped."""
     async with _InputBarApp().run_test(size=(120, 15)) as pilot:
@@ -1587,14 +1611,21 @@ async def test_input_bar_locked_queue_disables_text_area_until_unlock() -> None:
         assert text_area.disabled is False
 
 
-async def test_input_bar_consume_retry_text_returns_and_clears_note() -> None:
-    async with _InputBarApp().run_test() as pilot:
-        ib = pilot.app.query_one(InputBar)
+async def test_continue_button_sends_the_typed_note_stripped_and_clears_it() -> None:
+    retries: list[str] = []
 
+    class RetryApp(_InputBarApp):
+        def on_input_bar_retry_requested(self, event: InputBar.RetryRequested) -> None:
+            retries.append(event.text)
+
+    async with RetryApp().run_test() as pilot:
+        ib = pilot.app.query_one(InputBar)
+        ib.retry_mode = True
         ib.value = "  retry note  "
         await pilot.pause()
 
-        assert ib.consume_retry_text() == "retry note"
+        ib.on_button_pressed(Button.Pressed(ib.query_one("#send-btn", Button)))
+        await wait_for(lambda: retries == ["retry note"], pilot=pilot, description="note sent as the continue")
         assert ib.value == ""
 
 
@@ -1629,8 +1660,8 @@ async def test_submit_button_closes_prompt_history_and_discards_held_selection(
 
     async with app.run_test() as pilot:
         screen = app.main_screen
-        monkeypatch.setattr(screen._input_flow, "submit_user_text", submitted.append)
-        monkeypatch.setattr(screen._input_flow, "request_retry", retried.append)
+        monkeypatch.setattr(screen._input_flow, "submit_user_text", lambda text, _draft=None: submitted.append(text))
+        monkeypatch.setattr(screen._input_flow, "request_retry", lambda text, _draft=None: retried.append(text))
         input_bar = screen.query_one(InputBar)
         input_bar.retry_mode = retry
         input_bar.value = "ready"

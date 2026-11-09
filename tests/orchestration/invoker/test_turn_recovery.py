@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import create_autospec
+from unittest.mock import call, create_autospec
 
 import pytest
 
@@ -72,8 +72,8 @@ async def test_real_prepare_stop_retry_does_not_use_previous_invocation(
     begun = []
     original_begin = engine.current.loaded.bindings.inputs.begin_invocation
 
-    def begin():
-        original_begin()
+    def begin(*, typed_text=None):
+        original_begin(typed_text=typed_text)
         begun.append(engine.current.loaded.bindings.inputs.origin)
 
     monkeypatch.setattr(
@@ -288,7 +288,9 @@ async def test_admission_errors_finalize_and_save_once(
         assert engine.current.loaded.bindings.state.last_error == "admission denied"
         assert "Turn admission failed: admission denied" in caplog.text
         assert engine.execution_busy() is False
-        saved.assert_awaited_once()
+        # A fresh prompt saves the committed previous-turn cleanup before
+        # request validation; the rejected pass still finalizes exactly once.
+        assert saved.await_args_list == ([call(raise_on_error=True), call()] if site == "fresh_request" else [call()])
         assert main.call_count == 1
     finally:
         await engine.shutdown()
@@ -364,7 +366,7 @@ async def test_request_admission_failure_converges_fsm(
         assert engine.current.loaded.bindings.state.run_failed is True
         assert engine.current.loaded.bindings.state.last_error == "admission denied"
         assert engine.execution_busy() is False
-        saved.assert_awaited_once()
+        assert saved.await_args_list == ([call(raise_on_error=True), call()] if site.startswith("fresh") else [call()])
         assert main.call_count == 1
     finally:
         if engine.turns.turn_state.lease.run_task is not None and engine.turns.turn_state.lease.run_task.done():

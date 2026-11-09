@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from chrys.foundation.config.settings import Settings
-from chrys.foundation.config.settings_store import LoadedSettings, SettingsHandle
+from chrys.foundation.config.settings_store import LoadedSettings, PreparedSettings, SettingsHandle
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.events.types import AgentRuntimeDetails, ApprovalAutoFulfillBlocked
 from chrys.foundation.models.workspace import Workspace
@@ -95,6 +95,9 @@ class _FakeExecutor:
 
 
 class _Permits:
+    def staged_profiles(self) -> None:
+        return None
+
     def advance_build_generation(self) -> None:
         return None
 
@@ -141,7 +144,9 @@ class _LoaderFixture:
     def __init__(self, bus: EventBus, executor: _FakeExecutor) -> None:
         self.current = SimpleNamespace(loaded=SimpleNamespace(), manifest=make_manifest())
         self.permits = _Permits()
-        self.session = _BuildSession(session_dir=None, background_tasks=None, surface=None)
+        self.session = _BuildSession(
+            session_dir=None, background_tasks=None, surface=None, pause_failed_sub_agents=True
+        )
         self.session.agent_profile = AgentProfile(name="Code")
         self.session.workspace = None
         self.session.session_id = "session-1"
@@ -232,12 +237,17 @@ class _LoaderFixture:
         )
 
 
+def _prepared(loaded: LoadedSettings) -> PreparedSettings:
+    """*loaded* staged as it stands: no session layer, no live choices."""
+    return PreparedSettings(base=loaded, effective=loaded)
+
+
 def _stage(engine: _LoaderFixture) -> agent_lifecycle.StagedBuild:
     """Stage the engine's own live state, as start/soft_restart do for a rebuild."""
     return agent_lifecycle.stage_build(
         session=engine.session,
         persistence=engine.persistence,
-        loaded=engine.loaded_settings,
+        prepared=engine.settings_handle.prepare(engine.settings_handle.base),
         agent_profile=AgentProfile(name="Code"),
         workspace=engine.session.workspace,
         hook_manager=engine.session.hook_manager,
@@ -532,7 +542,7 @@ async def test_a_failed_build_leaves_the_live_state_untouched_and_drains_the_can
 
     staged_coordinator = MagicMock()
     staged = agent_lifecycle.StagedBuild(
-        loaded=LoadedSettings(settings=Settings(default_approval_mode="auto"), provenance={}),
+        prepared=_prepared(LoadedSettings(settings=Settings(default_approval_mode="auto"), provenance={})),
         agent_profile=AgentProfile(name="Code"),
         workspace=Workspace.from_cwd(str(tmp_path / "new")),
         hook_manager=MagicMock(),
@@ -570,7 +580,7 @@ async def test_the_build_commit_installs_the_staged_state_together(tmp_path: Pat
     engine.session.mutation_coordinator = old_coordinator
 
     staged = agent_lifecycle.StagedBuild(
-        loaded=LoadedSettings(settings=Settings(default_approval_mode="auto"), provenance={}),
+        prepared=_prepared(LoadedSettings(settings=Settings(default_approval_mode="auto"), provenance={})),
         agent_profile=AgentProfile(name="Code"),
         workspace=Workspace.from_cwd(str(tmp_path / "new")),
         hook_manager=MagicMock(),
@@ -629,7 +639,7 @@ async def test_a_cancelled_post_commit_cleanup_still_leaves_the_committed_profil
 
     engine.current.loaded.prepared.own(_record_replaced_cleanup)
     staged = agent_lifecycle.StagedBuild(
-        loaded=LoadedSettings(settings=Settings(), provenance={}),
+        prepared=_prepared(LoadedSettings(settings=Settings(), provenance={})),
         agent_profile=AgentProfile(name="Explore"),
         workspace=None,
         hook_manager=None,
@@ -669,7 +679,7 @@ async def test_a_cancelled_post_commit_cleanup_still_carries_the_preserved_histo
     old_executor = _CancelledOnClose(old_approval)
     engine = _LoaderFixture(bus, old_executor)
     staged = agent_lifecycle.StagedBuild(
-        loaded=LoadedSettings(settings=Settings(), provenance={}),
+        prepared=_prepared(LoadedSettings(settings=Settings(), provenance={})),
         agent_profile=AgentProfile(name="Explore"),
         workspace=None,
         hook_manager=None,

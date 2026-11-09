@@ -69,6 +69,8 @@ icode agent list
 
 If "Code review" appears in the list, the profile has loaded. If it does not appear, check the YAML parsing or field validation warnings shown at startup, and confirm that the file is in the user agent profile directory.
 
+`icode agent list` and `icode model list` read your user configuration without requiring a working directory. They also work if the directory you launched them from has been deleted.
+
 ## Top-level fields
 
 | Field | Type | Default | Description |
@@ -81,6 +83,7 @@ If "Code review" appears in the list, the profile has loaded. If it does not app
 | `instructions` | String or list of strings | Empty | Main behavioral instructions for agents of the built-in type. A list is joined into one text, one item per line. External ACP profiles ignore this field. |
 | `model` | Object | `{}` | Binds a model profile. See [model](#model). |
 | `tools` | Object | `{}` | Configures built-in tools, MCP, and shell filtering. See [tools](#tools). |
+| `extensions` | List of strings | `[]` | The Python extensions the agent loads. See [extensions](#extensions). |
 | `approval` | Object | See below | Configures which tool calls require approval. See [approval](#approval). |
 | `skills` | Object | See below | Configures skill sources and inline skills. See [skills](#skills). |
 | `memory` | Object | `{}` | Configures reference files to load automatically. See [memory](#memory). |
@@ -154,7 +157,7 @@ tools:
         Authorization: "Bearer {{MCP_API_TOKEN}}"
 ```
 
-Both `env` and `headers` are key-value mappings: enter the variable or header name on the left and its value on the right. You can specify values directly or use `{{ENV_VAR}}` to reference an environment variable set before starting iCode. If a variable referenced in `env` is missing or empty, the server connection fails. For `headers`, variables are resolved and this rule applies only when `resolve_header_templates` is `true`.
+Both `env` and `headers` are key-value mappings: enter the variable or header name on the left and its value on the right. You can specify values directly, use `{{ENV_VAR}}` to reference an environment variable set before starting iCode, or use `{{!command}}` to use what a command prints (see [Get an API key from a command](../guides/configuration/models.md#get-an-api-key-from-a-command)). If a variable referenced in `env` is missing or empty, or a command fails the first time, the server connection fails. For `headers`, placeholders are resolved and this rule applies only when `resolve_header_templates` is `true`.
 
 | Field | Type | Default | Applies to | Description |
 | --- | --- | --- | --- | --- |
@@ -176,7 +179,7 @@ Both `env` and `headers` are key-value mappings: enter the variable or header na
 | `encoding` | String or `null` | `null` | STDIO | Encoding for the server's standard input and output. Usually left empty. |
 | `url` | String | Empty | HTTP | Server URL beginning with `http://` or `https://`. |
 | `headers` | String-valued object | `{}` | HTTP | HTTP request headers. |
-| `resolve_header_templates` | Boolean | `true` | HTTP | Whether to resolve `{{ENV_VAR}}` in header values. If `false`, sends values literally. |
+| `resolve_header_templates` | Boolean | `true` | HTTP | Whether to resolve `{{ENV_VAR}}` and `{{!command}}` in header values. If `false`, sends values literally. |
 | `verify_ssl` | Boolean | `true` | HTTP | Whether to verify HTTPS certificates. Disabling this reduces connection security. |
 | `bypass_proxy` | Boolean | `false` | HTTP | Whether to bypass HTTP/HTTPS proxies configured through environment variables and connect directly to the server. |
 | `terminate_on_close` | Boolean or `null` | `null` | HTTP | Whether to request termination of the remote session when closing the connection. `null` uses the default of `true`. |
@@ -273,7 +276,7 @@ Each entry in `providers` supports these fields:
 
 | Field | Applies to | Description |
 | --- | --- | --- |
-| `type` | All | Required. `exa_mcp`, `bing_html`, or `duckduckgo_html` for services that need no key; `tavily`, `brave`, or `exa` for search APIs with a key; `custom_http` for your own endpoint. |
+| `type` | All | Required. `exa_mcp`, `bing_html`, `duckduckgo_html`, or `keenable` for services that need no key; `tavily`, `brave`, or `exa` for search APIs with a key; `custom_http` for your own endpoint. |
 | `api_key_env` | `tavily`, `brave`, `exa` | Required. Name of the environment variable that holds the API key. These types accept no other field. |
 | `preset` | `custom_http` | `searxng` or `serpapi`. Fills in the request and response mapping for that service; `serpapi` also sets `endpoint` and `auth`. Fields you set yourself take precedence. |
 | `endpoint` | `custom_http` | URL of the search endpoint. It must also be granted in the `tools.web_search.custom_endpoints` user setting, together with every environment variable the provider reads. |
@@ -283,7 +286,7 @@ Each entry in `providers` supports these fields:
 | `request` | `custom_http` | `query_params` and, for `POST`, `json`. A value written as `{$input: query}`, `{$input: limit}`, `{$input: allowed_domains}`, or `{$input: blocked_domains}` is replaced by that search input, and `{$env: NAME}` by an environment variable. |
 | `response` | `custom_http` | JSON Pointers into the response: `results_pointer` and `url_pointer` (required unless a preset provides them), plus optional `title_pointer` and `snippet_pointer`. |
 
-`exa_mcp`, `bing_html`, and `duckduckgo_html` accept only `type`.
+`exa_mcp`, `bing_html`, `duckduckgo_html`, and `keenable` accept only `type`.
 
 A complete `custom_http` example for the DeepSeek Search API is in [Configure web tools](../guides/configuration/web-tools.md#deepseek-search-api). See DeepSeek's documentation for the models and billing that support its server-side `web_search`.
 
@@ -307,6 +310,15 @@ tools:
 | `timeout_seconds` | Integer | The `tools.web_fetch.timeout_seconds` user setting (`60`) | Deadline in seconds for a whole fetch call, from `1` to `120`. |
 
 Network access (the proxy, origin lists, and custom endpoint grants) can be set only in user settings, not in agent profiles. See [Web tools](./settings.md#web-tools) in the settings reference.
+
+## extensions
+
+```yaml
+extensions:
+  - tracker
+```
+
+Ids of the [Python extensions](../guides/extensions/python-extensions.md) the agent loads, in order. An extension that is not installed stays in the list; the agent starts without it, with a warning.
 
 ## approval
 
@@ -387,7 +399,11 @@ Skill scripts are an exception: `run_skill_script` requires approval by default.
 
 Web tools are also an exception: tools of the `web_search` and `web_fetch` kinds require approval by default, even when `default` is `auto`. This rule applies after the rules in `overrides` and before `default`. To change it, explicitly set an approval level for the kind or tool name in `overrides`, for example `web_search: auto`.
 
+Tools from [Python extensions](../guides/extensions/python-extensions.md) follow the same rule, except those their author marked as safe to run unasked. To change it, set an approval level for the extension's kind or one of its tools, for example `extension.tracker: auto`.
+
 ## skills
+
+The fields in the table below treat a key left without a value — for example after commenting out its items — as omitted, so the field keeps its default. A list field must be written as a list; a single value such as `paths: ./team-skills` makes iCode skip the whole profile.
 
 ```yaml
 skills:
@@ -518,7 +534,7 @@ For configuration instructions and call verification, see [Configure agents](../
 
 When `acp` appears at the top level, the profile becomes an external ACP agent and is forced to be available only as a sub-agent. The external process determines its task instructions, model, and tools.
 
-External ACP agents do not use `instructions`, `model.profile_id`, `tools`, `skills`, `memory`, `compaction`, `approval`, or `sub_agents` from the current profile. These settings do not affect the external agent's behavior.
+External ACP agents do not use `instructions`, `model.profile_id`, `tools`, `extensions`, `skills`, `memory`, `compaction`, `approval`, or `sub_agents` from the current profile. These settings do not affect the external agent's behavior.
 
 ```yaml
 name: ExternalReviewer
@@ -549,4 +565,4 @@ acp:
 
 **Directory scope for `allow_external_cwd`**: If an ACP client creates the iCode session and supplies additional working directories, the external agent can run in those directories and their subdirectories even when `allow_external_cwd` is `false`.
 
-`command`, `args`, values in `env`, and `cwd` can use `{{ENV_VAR}}` to reference environment variables from the iCode process. Missing or empty variables cause startup to fail. For connection tests, working directory security boundaries, and how configuration options are applied, see [Configure external ACP agents](../guides/extensions/external-acp-agents.md).
+`command`, `args`, values in `env`, and `cwd` can use `{{ENV_VAR}}` to reference environment variables from the iCode process. Missing or empty variables cause startup to fail. `args` and values in `env` can also use `{{!command}}`, which runs each time the external agent starts; `command` and `cwd` cannot. For connection tests, working directory security boundaries, and how configuration options are applied, see [Configure external ACP agents](../guides/extensions/external-acp-agents.md).

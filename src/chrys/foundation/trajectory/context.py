@@ -286,6 +286,7 @@ class ExchangeTrace:
 
     __slots__ = (
         "_chunk_count",
+        "_connection",
         "_context_revision_id",
         "_finished",
         "_first_chunk_ns",
@@ -293,6 +294,7 @@ class ExchangeTrace:
         "_gaps_ms",
         "_last_chunk_ns",
         "_outcome_override",
+        "_request_model",
         "_stall_count",
         "_started",
         "_started_at",
@@ -319,6 +321,8 @@ class ExchangeTrace:
         self._stall_count = 0
         self._outcome_override: str | None = None
         self._context_revision_id: str | None = None
+        self._request_model: object = None
+        self._connection: dict[str, Any] = {}
 
     @property
     def operation_id(self) -> str:
@@ -347,19 +351,27 @@ class ExchangeTrace:
             return {}
         return {"context_revision_id": self._context_revision_id}
 
-    def started(self, *, payload: Mapping[str, Any] | None = None) -> None:
-        """Record the request start (once); *payload* carries the request facts."""
+    def started(self, *, payload: Mapping[str, Any] | None = None, connection: Mapping[str, Any] | None = None) -> None:
+        """Record the request start (once); *payload* carries the request facts.
+
+        *connection* names the model profile the request went through. Both
+        markers carry it, over the scope's own facts: the client that sent the
+        request knows which profile that was, whichever actor asked.
+        """
         if self._started:
             return
         self._started = True
         self._started_ns = monotonic_now_ns()
         self._started_at = utc_now_rfc3339()
+        self._connection = dict(connection or {})
         data: dict[str, Any] = {
             **self.context.exchange_facts,
+            **self._connection,
             **self._revision_facts(),
             **(payload or {}),
             "started_at": self._started_at,
         }
+        self._request_model = data.get("request_model")
         self.context.sink.emit_soon(
             self.context.draft(
                 EventType.MODEL_EXCHANGE_STARTED,
@@ -413,6 +425,7 @@ class ExchangeTrace:
         ended_at = utc_now_rfc3339()
         data: dict[str, Any] = {
             **self.context.exchange_facts,
+            **self._connection,
             **self._revision_facts(),
             **(payload or {}),
             "outcome": self._outcome_override or outcome,
@@ -422,6 +435,10 @@ class ExchangeTrace:
             "chunk_count": self._chunk_count,
             "stall_count": self._stall_count,
         }
+        if "response_model" not in data and self._request_model is not None:
+            # A response that named no model, or a failed one, is still the model the start marker
+            # asked (a per-request override, not the profile's): its tokens count under it.
+            data["request_model"] = self._request_model
         clock = measurement(MeasurementSource.MONOTONIC_CLOCK, method_version=1)
         provenance: dict[str, Mapping[str, Any]] = {"/payload/duration_ms": clock}
         if self._first_chunk_ns is not None:

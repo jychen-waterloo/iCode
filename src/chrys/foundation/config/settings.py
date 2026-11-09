@@ -27,6 +27,7 @@ from chrys.foundation.config.coercion import (
     text_coercer,
 )
 from chrys.foundation.config.context import EvalContext
+from chrys.foundation.config.errors import INVALID_SETTING, ConfigValueError
 from chrys.foundation.config.spec import (
     Apply,
     ChoiceProvider,
@@ -126,6 +127,9 @@ def _load_bool_env(name: str, *, default: bool = False) -> bool:
 DEFAULT_ASK_USER_TIMEOUT_SECONDS = 900
 """Default ``ask_user`` reply wait (15 minutes) when ``CHRYS_ASK_USER_TIMEOUT_SECONDS`` is unset."""
 
+DEFAULT_CREDENTIAL_COMMAND_TTL_SECONDS = 3600
+"""How long a ``{{!command}}`` placeholder's output is used before it is run again (one hour)."""
+
 DEFAULT_MAX_TRANSIENT_RETRIES = 10
 """Default application-layer transient retry budget for interactive frontends."""
 
@@ -151,6 +155,15 @@ DEFAULT_TOOL_RESULT_CEILING_TOKENS = 64_000
 
 TOOL_RESULT_CEILING_FLOOR = 2_000
 """Minimum positive ``CHRYS_TOOL_RESULT_CEILING_TOKENS`` value."""
+
+DEFAULT_IMAGE_SEND_LIMIT_KB = 256
+"""Default most KiB an image is sent to a model with (``foundation.text.images.MAX_IMAGE_BYTES``)."""
+
+MIN_IMAGE_SEND_LIMIT_KB = 32
+"""Lowest image send limit: below it most photos shrink to thumbnails."""
+
+MAX_IMAGE_SEND_LIMIT_KB = 3072
+"""Highest image send limit, the size images were sent at before compression got a setting."""
 
 DEFAULT_WORKSPACE_MRU_MAX_ENTRIES = 20
 """Default number of recently used workspace directories kept in the MRU index."""
@@ -672,10 +685,14 @@ _LABEL_TRAJECTORY_VERIFY_COMMANDS = msg(
     "settings.trajectory.verify_commands.label", fallback="Trajectory verification commands"
 )
 _LABEL_LLM_RETRY_MAX_TRANSIENT = msg("settings.llm.retry.max_transient.label", fallback="Max transient retries")
+_LABEL_LLM_CREDENTIAL_COMMAND_TTL_SECONDS = msg(
+    "settings.llm.credential_command.ttl_seconds.label", fallback="Credential command refresh interval (seconds)"
+)
 _LABEL_TOOLS_RESULT_CEILING_TOKENS = msg(
     "settings.tools.result.ceiling_tokens.label", fallback="Tool result ceiling (tokens)"
 )
 _LABEL_SEARCH_RESPECT_GITIGNORE = msg("settings.tools.search.respect_gitignore.label", fallback="Respect .gitignore")
+_LABEL_TOOLS_IMAGE_SEND_LIMIT_KB = msg("settings.tools.image.send_limit_kb.label", fallback="Image size limit (KB)")
 _LABEL_UI_THEME = msg("settings.ui.theme.label", fallback="Theme")
 _LABEL_UI_LOCALE = msg("settings.ui.locale.label", fallback="UI Language")
 _LABEL_UI_CHAT_TOOL_GROUPS_EXPANDED = msg(
@@ -686,6 +703,7 @@ _LABEL_UI_CHAT_THINKING_EXPANDED = msg("settings.ui.chat.show_thinking.label", f
 _LABEL_UI_CHAT_FOLD_FINISHED_TURNS = msg(
     "settings.ui.chat.fold_finished_turns.label", fallback="Automatically fold completed turns"
 )
+_LABEL_UI_CHAT_IMAGE_GRAPHICS = msg("settings.ui.chat.image_graphics.label", fallback="Full-color images")
 _LABEL_UI_EDITOR_KEYMAP = msg("settings.ui.editor.keymap.label", fallback="Editor keymap")
 _LABEL_WORKSPACE_MRU_MAX_ENTRIES = msg("settings.workspace.mru_max_entries.label", fallback="Recent workspaces to keep")
 _LABEL_APPROVAL_TIMEOUT_SECONDS = msg(
@@ -730,7 +748,7 @@ _LABEL_HISTORY_PROMPT_ENABLED = msg("settings.history.prompt.enabled.label", fal
 _LABEL_UI_CHAT_FILE_SNAPSHOT_INLINE_CHARS = msg(
     "settings.ui.chat.file_snapshot_inline_chars.label", fallback="Inline file snapshot limit (chars)"
 )
-_LABEL_MODEL_ROLE_BUDDY_MODEL_ID = msg("settings.model.role.buddy_model_id.label", fallback="Buddy model")
+_LABEL_MODEL_ROLE_BUDDY = msg("settings.model.role.buddy.label", fallback="Buddy model")
 _LABEL_LOG_RAW_HTTP_CAPTURE = msg("settings.log.raw_http_capture.label", fallback="Capture raw model HTTP requests")
 _LABEL_MUTATIONS_TRACE_MODE = msg("settings.mutations.trace.mode.label", fallback="Mutation trace mode")
 _LABEL_MUTATIONS_TRACE_FSATRACE_PATH = msg("settings.mutations.trace.fsatrace_path.label", fallback="fsatrace path")
@@ -795,7 +813,7 @@ class Settings:
     """Application settings.
 
     Field defaults are plain literals: every source (built-in default, user
-    YAML, project layer, dotenv, real process env, CLI, session pin) is merged
+    YAML, project layer, real process env, CLI, session pin) is merged
     by :func:`chrys.foundation.config.settings_store.load_settings`, which is
     the only thing that reads the environment. A bare ``Settings()`` is
     therefore a pure value with no hidden process dependency.
@@ -981,6 +999,19 @@ class Settings:
             semantic_value=_semantic_max_transient_retries,
         ),
     )
+    # A rejected token (HTTP 401) is replaced at once, whatever this says.
+    credential_command_ttl_seconds: int = field(
+        default=DEFAULT_CREDENTIAL_COMMAND_TTL_SECONDS,
+        metadata=spec(
+            key="llm.credential_command.ttl_seconds",
+            label=_LABEL_LLM_CREDENTIAL_COMMAND_TTL_SECONDS,
+            env="CHRYS_CREDENTIAL_COMMAND_TTL_SECONDS",
+            coerce=int_coercer(minimum=60),
+            apply=Apply.RESTART,  # Read from the process snapshot: no engine or session where it is used.
+            group="llm",
+            kind=Kind.INT,
+        ),
+    )
     frontend_default_max_transient_retries: int = field(
         default=DEFAULT_MAX_TRANSIENT_RETRIES,
         metadata=spec(
@@ -1024,6 +1055,23 @@ class Settings:
             apply=Apply.RELOAD,
             group="tools",
             kind=Kind.BOOL,
+        ),
+    )
+
+    # The most an image attached, viewed or sent by an ACP client takes in a
+    # request; a larger one is compressed to fit. Each turn and retry also
+    # shrinks the session's earlier images to it, so lowering it fixes a
+    # request a gateway refused as too large.
+    image_send_limit_kb: int = field(
+        default=DEFAULT_IMAGE_SEND_LIMIT_KB,
+        metadata=spec(
+            key="tools.image.send_limit_kb",
+            label=_LABEL_TOOLS_IMAGE_SEND_LIMIT_KB,
+            env="CHRYS_IMAGE_SEND_LIMIT_KB",
+            coerce=int_coercer(minimum=MIN_IMAGE_SEND_LIMIT_KB, maximum=MAX_IMAGE_SEND_LIMIT_KB),
+            apply=Apply.RELOAD,
+            group="tools",
+            kind=Kind.INT,
         ),
     )
 
@@ -1520,6 +1568,22 @@ class Settings:
         ),
     )
 
+    # Whether chat images use the terminal's own graphics (kitty protocol, Sixel) where the terminal
+    # is known to have them; off, every terminal shows the half-block approximation. Read once, when
+    # the TUI starts: what the terminal already holds is not redrawn.
+    chat_image_graphics: bool = field(
+        default=True,
+        metadata=spec(
+            key="ui.chat.image_graphics",
+            label=_LABEL_UI_CHAT_IMAGE_GRAPHICS,
+            coerce=bool_coercer(),
+            apply=Apply.RESTART,
+            group="ui",
+            kind=Kind.BOOL,
+            project_merge=ProjectMerge.DENY,
+        ),
+    )
+
     # Maximum combined before/after snapshot bytes chat tool records keep
     # inline.  ``0`` keeps nothing inline.
     chat_file_snapshot_inline_chars: int = field(
@@ -1536,17 +1600,17 @@ class Settings:
     )
 
     # ── Buddy ─────────────────────────────────────────────────────
-    # Model id used for what the buddy says when petted.  Empty = the active
-    # profile's model.  Sits under ``model.role`` with the other per-role
-    # selectors, but holds a *model id* rather than a profile selector —
-    # hence the ``_model_id`` leaf, which is the only thing telling a reader
-    # of the YAML that a profile name will not work here.
-    buddy_model: str = field(
+    # Model profile selector (id or unique name) for what the buddy says when
+    # petted.  Empty, or a profile that is gone or not filled in = the active
+    # profile.  Looked up by ``app/features/buddy/replies.py``.  It replaced
+    # ``model.role.buddy_model_id``, a bare model id asked of the active
+    # profile's connection, which ``migrate_buddy_model_profile`` moves here.
+    buddy_model_profile: str = field(
         default="",
         metadata=spec(
-            key="model.role.buddy_model_id",
-            label=_LABEL_MODEL_ROLE_BUDDY_MODEL_ID,
-            env="CHRYS_PET_MODEL",
+            key="model.role.buddy",
+            label=_LABEL_MODEL_ROLE_BUDDY,
+            env="CHRYS_MODEL_PROFILE_BUDDY",
             coerce=text_coercer(),
             apply=Apply.RELOAD,
             group="model",
@@ -1993,12 +2057,15 @@ class Settings:
             return self.max_transient_retries
         return self.frontend_default_max_transient_retries
 
+    def image_send_limit_bytes(self) -> int:
+        """Return the most bytes an image is sent to a model with."""
+        return self.image_send_limit_kb * 1024
 
-def _persist_one(key: str, value: Any, *, log_value: bool = True) -> None:
+
+def _persist_one(key: str, value: Any, *, log_value: bool = True) -> Exception | None:
     """Write one dotted key to the user settings document, without raising.
 
-    The thin shared body of the ``persist_*`` helpers: failures are logged and
-    swallowed so a disk/permission issue doesn't crash the TUI, and a value the
+    Return the failure so the TUI can report an unsaved choice. A value the
     store refuses is logged rather than written. No ``os.environ`` mirror —
     the mirror would turn the panel's own write into an ``ENV``-layer value,
     and provenance would then call it "overridden, editing has no effect".
@@ -2007,36 +2074,38 @@ def _persist_one(key: str, value: Any, *, log_value: bool = True) -> None:
 
     try:
         result = persist({key: value})
-    except Exception:
+    except Exception as exc:
         if log_value:
             logger.warning("Failed to persist %s=%r", key, value, exc_info=True)
         else:
             logger.warning("Failed to persist %s", key, exc_info=True)
-        return
+        return exc
     if not result.ok:
         if log_value:
             logger.warning("Refusing to persist %s: %r", key, value)
         else:
             logger.warning("Refusing to persist %s: value rejected", key)
+        return ConfigValueError(INVALID_SETTING.bind(key=key))
+    return None
 
 
-def persist_theme(theme: str) -> None:
+def persist_theme(theme: str) -> Exception | None:
     """Write ``ui.theme`` to the user settings document so it survives restart."""
-    _persist_one("ui.theme", theme)
+    return _persist_one("ui.theme", theme)
 
 
-def persist_locale(locale: str) -> None:
+def persist_locale(locale: str) -> Exception | None:
     """Write ``ui.locale`` to the user settings document without raising."""
     # Content-free logging by design: the requested value must not reach the log.
-    _persist_one("ui.locale", locale, log_value=False)
+    return _persist_one("ui.locale", locale, log_value=False)
 
 
-def persist_tool_groups_expanded(value: bool) -> None:
+def persist_tool_groups_expanded(value: bool) -> Exception | None:
     """Persist whether newly created live tool groups start expanded."""
-    _persist_one("ui.chat.tool_groups_expanded", value)
+    return _persist_one("ui.chat.tool_groups_expanded", value)
 
 
-def persist_approval_mode(mode: str) -> None:
+def persist_approval_mode(mode: str) -> Exception | None:
     """Write ``approval.default_mode`` to the user settings document.
 
     ``bypass`` never persists — :func:`chrys.foundation.config.settings_store.persist`
@@ -2044,9 +2113,9 @@ def persist_approval_mode(mode: str) -> None:
     mode; that mode must always be an explicit opt-in within a launch. Unknown
     values are ignored (logged, not written).
     """
-    _persist_one("approval.default_mode", mode)
+    return _persist_one("approval.default_mode", mode)
 
 
-def persist_editor_keymap(mode: str) -> None:
+def persist_editor_keymap(mode: str) -> Exception | None:
     """Persist the selected message-editor keymap."""
-    _persist_one("ui.editor.keymap", mode)
+    return _persist_one("ui.editor.keymap", mode)

@@ -17,6 +17,7 @@ from textual.app import App
 from textual.content import Content
 from textual.widgets import Button, Log, Static, TabbedContent
 
+from chrys.app.tui.screens.dialogs import hook_run as hook_run_module
 from chrys.app.tui.screens.dialogs.hook_run import HookRunModal, _CopySection
 from chrys.app.tui.widgets.chat.tool_call import fmt_duration
 from chrys.foundation.models.hook_runs import HookRunApplied, HookRunDetail, HookRunIO, HookRunRecord
@@ -160,13 +161,15 @@ async def _open(pilot, app: _ModalApp) -> HookRunModal:
 # --- Title, tab choice, Input ---------------------------------------------------
 
 
-async def test_an_ended_run_opens_on_output_with_its_title_and_state() -> None:
+async def test_an_ended_run_opens_on_input_with_its_title_and_state() -> None:
     record = _record(outcome=HookOutcome.FAILED, exit_code=3)
     app = _ModalApp(_detail(record, io=_io(stderr="boom"), applied=HookRunApplied(not_applied="failed")))
     async with app.run_test(size=(120, 40)) as pilot:
         modal = await _open(pilot, app)
         assert _title(modal) == "Hook #7 · guard"
-        assert _active(modal) == "hook-run-output"
+        # The first tab from the first paint on: no switch to Output after it. A switch queued at
+        # mount would land on the next pumps, well inside 0.3 s.
+        assert not await wait_until(lambda: _active(modal) != "hook-run-input", pilot=pilot, timeout=0.3)
         subtitle = _subtitle(modal)
         assert "exit 3" in subtitle
         assert "500ms" in subtitle or "0.5s" in subtitle, subtitle
@@ -301,6 +304,14 @@ async def test_a_cut_payload_says_so() -> None:
     async with app.run_test(size=(140, 50)) as pilot:
         modal = await _open(pilot, app)
         assert "Payload cut at 64 KB of" in _pane_text(modal, "hook-run-input")
+
+
+async def test_a_cut_payload_at_a_megabyte_names_a_megabyte() -> None:
+    io = _io(payload=_PAYLOAD[:40], payload_size=1_048_575)
+    app = _ModalApp(_detail(io=io))
+    async with app.run_test(size=(140, 50)) as pilot:
+        modal = await _open(pilot, app)
+        assert "Payload cut at 64 KB of 1.0 MB" in _pane_text(modal, "hook-run-input")
 
 
 # --- Output ---------------------------------------------------------------------
@@ -470,7 +481,19 @@ async def test_a_run_whose_details_are_gone_says_so_and_keeps_the_configured_fie
 
 # --- Polling --------------------------------------------------------------------
 
+_FAST_POLL_SECONDS = 0.1
 
+
+@pytest.fixture
+def fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll every 0.1 s where what is polled is under test, not the cadence.
+
+    The real one-second poll still runs in every other test that polls, the queue time counting up among them.
+    """
+    monkeypatch.setattr(hook_run_module, "_POLL_SECONDS", _FAST_POLL_SECONDS)
+
+
+@pytest.mark.usefixtures("fast_poll")
 async def test_a_running_run_fills_its_output_once_it_ends_without_switching_tab() -> None:
     now = time.monotonic()
     record = _record(state="running", started_at=now - 1.0, ended_at=None, outcome=None, exit_code=None)
@@ -489,11 +512,14 @@ async def test_a_running_run_fills_its_output_once_it_ends_without_switching_tab
         )
         assert "Running…" not in _pane_text(modal, "hook-run-output")
         assert _active(modal) == "hook-run-input", "the user may be reading the payload"
-        # Not only the reads: a timer left running would wake the dialog every second.
+        # Not only the reads: a timer left running would wake the dialog on every poll, three times here.
         polled = app.modal.polls
-        assert not await wait_until(lambda: app.modal.polls > polled, timeout=2.5, pilot=pilot), "polling stops"
+        assert not await wait_until(lambda: app.modal.polls > polled, timeout=3 * _FAST_POLL_SECONDS, pilot=pilot), (
+            "polling stops"
+        )
 
 
+@pytest.mark.usefixtures("fast_poll")
 async def test_a_run_the_log_drops_while_its_dialog_polls_says_its_details_are_gone_and_stops_polling() -> None:
     now = time.monotonic()
     record = _record(state="running", started_at=now - 1.0, ended_at=None, outcome=None, exit_code=None)
@@ -513,11 +539,14 @@ async def test_a_run_the_log_drops_while_its_dialog_polls_says_its_details_are_g
         assert "Running…" not in _pane_text(modal, "hook-run-output")
         assert _subtitle(modal) == "", "how it ended is not known"
         assert _active(modal) == "hook-run-input", "the tab stays where the user is"
-        # Not only the reads: a timer left running would wake the dialog every second.
+        # Not only the reads: a timer left running would wake the dialog on every poll, three times here.
         polled = app.modal.polls
-        assert not await wait_until(lambda: app.modal.polls > polled, timeout=2.5, pilot=pilot), "polling stops"
+        assert not await wait_until(lambda: app.modal.polls > polled, timeout=3 * _FAST_POLL_SECONDS, pilot=pilot), (
+            "polling stops"
+        )
 
 
+@pytest.mark.usefixtures("fast_poll")
 async def test_a_payload_shown_before_the_log_dropped_the_runs_details_still_copies(copied: list[str]) -> None:
     now = time.monotonic()
     record = _record(state="running", started_at=now - 1.0, ended_at=None, outcome=None, exit_code=None)
@@ -581,9 +610,11 @@ def _notices(app: App) -> list[str]:
 
 
 async def _ended_with_output(pilot) -> HookRunModal:
+    """Open the dialog and click its Output tab, as a user does: it opens on Input."""
     modal = await _open(pilot, pilot.app)
     tabs = modal.query_one(TabbedContent)
-    await wait_for(lambda: tabs.active == "hook-run-output", pilot=pilot, description="opened on output")
+    await click_when_settled(pilot, modal.query_one("#--content-tab-hook-run-output"))
+    await wait_for(lambda: tabs.active == "hook-run-output", pilot=pilot, description="on output")
     return modal
 
 
@@ -635,7 +666,8 @@ async def test_a_click_that_ends_a_text_selection_copies_nothing_more(
         with monkeypatch.context() as selecting:
             selecting.setattr(type(modal), "get_selected_text", lambda self: "out")
             await click_when_settled(pilot, stdout.children[-1])
-            assert not await wait_until(lambda: bool(copied), timeout=0.5, pilot=pilot)
+            # A copy follows the click as a message on the next pumps: 0.3 s is many.
+            assert not await wait_until(lambda: bool(copied), timeout=0.3, pilot=pilot)
         await click_when_settled(pilot, stdout.children[-1])
         await wait_for(lambda: copied == ["out-text\nline2"], pilot=pilot, description="copied once not selecting")
 

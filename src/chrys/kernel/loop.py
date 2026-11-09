@@ -34,6 +34,7 @@ from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from chrys.foundation.errors import (
+    ProviderResponseError,
     classify_error,
     clean_error_message,
     invalidates_continuation_token,
@@ -66,6 +67,7 @@ from chrys.foundation.trajectory.metadata import (
     ANALYTICS_ITEM_ID_KEY,
     OPERATION_ID_KEY,
 )
+from chrys.foundation.trajectory.usage import exchange_usage_payload
 
 from ._content import Content, add_usage_details, normalize_stream_usage
 from ._loop_recorder import LoopRecorder, _message_snapshot
@@ -118,14 +120,16 @@ CONTINUATION_POLL_INTERVAL_SECONDS: float = 2.0
 RESPONSE_READY_KWARG = "response_ready_observer"
 """``client_kwargs`` key of the run's :data:`ResponseReadyObserver`."""
 
-type ResponseReadyObserver = Callable[[ChatResponse], Awaitable[None]]
+type ResponseReadyObserver = Callable[[ChatResponse, bool], Awaitable[None]]
 """Awaited once per landed model response, before the loop runs its tools or returns it.
 
 Both drivers call it for every response, the final request without tools
 included, after the response is normalized (echoes removed, unexecutable
 calls stripped, fallback text added). A streamed response's updates were
 all yielded before it. An exception it raises fails the run before the
-response's tools run.
+response's tools run. The second argument is whether the loop ends with
+this response: it leaves no call to run (none, only informational or
+already answered ones, or no tools offered), so the run returns it.
 """
 
 
@@ -998,14 +1002,18 @@ class _LoopTrajectory:
         self._active_exchange = None
         self._last_exchange_id = trace.operation_id
         payload: dict[str, Any] = {}
+        measurements: dict[str, dict[str, Any]] | None = None
         if exc is not None:
             payload["error_code"] = type(exc).__name__
             policy = self._retry_policy
             payload["retryable"] = bool(policy is not None and policy.is_retryable(exc))
             if not isinstance(exc, asyncio.CancelledError):
                 payload["error_kind"] = classify_error(exc).kind
+            if isinstance(exc, ProviderResponseError) and exc.usage_details:
+                # The failed response still consumed these tokens; the session totals count them too.
+                payload["usage"], measurements = exchange_usage_payload(exc.usage_details)
         try:
-            trace.finished(outcome=outcome, payload=payload)
+            trace.finished(outcome=outcome, payload=payload, measurements=measurements)
         except Exception:
             logger.debug("Trajectory exchange close failed", exc_info=True)
 
@@ -1736,11 +1744,11 @@ class _LoopRun:
         await self._trajectory.cycle_finished(response, function_calls)
         return function_calls
 
-    async def _response_ready(self, response: ChatResponse) -> None:
+    async def _response_ready(self, response: ChatResponse, *, final: bool) -> None:
         # The landed response, before any of its tools run and before the
         # run returns it: what its caller shows of it must come first.
         if self._response_ready_observer is not None:
-            await self._response_ready_observer(response)
+            await self._response_ready_observer(response, final)
 
     async def _run_tool_batch(
         self, response: ChatResponse, function_calls: list[Content]
@@ -1874,8 +1882,9 @@ class _LoopRun:
             self._queue_consumed_injections(response, consumed_injection_messages)
 
             function_calls = await self._finish_cycle(response)
-            await self._response_ready(response)
-            if not (function_calls and self._options.get("tools")):
+            final = not (function_calls and self._options.get("tools"))
+            await self._response_ready(response, final=final)
+            if final:
                 _prepend_fcc_messages(response, self._fcc_messages)
                 response.usage_details = self._aggregated_usage
                 return _clear_internal_conversation_id(response)
@@ -1923,7 +1932,7 @@ class _LoopRun:
         await self._finish_cycle(response)
         stripped = _strip_unexecutable_calls_from_response(response)
         _ensure_exhaustion_fallback_response(response, fallback_text)
-        await self._response_ready(response)
+        await self._response_ready(response, final=True)
         # Gate on the resolved storage mode, not response metadata: under
         # conversation storage the service holds the stripped calls even
         # when the parsed response failed to carry the handle, and a
@@ -2004,8 +2013,9 @@ class _LoopRun:
 
                 # Continue only for unresolved local function calls.
                 function_calls = await self._finish_cycle(response)
-                await self._response_ready(response)
-                if not (function_calls and self._options.get("tools")):
+                final = not (function_calls and self._options.get("tools"))
+                await self._response_ready(response, final=final)
+                if final:
                     self._final_messages = [*self._fcc_messages, *response.messages]
                     return
 
@@ -2141,7 +2151,7 @@ class _LoopRun:
                 # non-stop reason like "length" — and it must arrive only
                 # after every stripped update.
                 yield ChatResponseUpdate(role="assistant", contents=[], finish_reason=final_response.finish_reason)
-            await self._response_ready(final_response)
+            await self._response_ready(final_response, final=True)
             self._count_streamed_usage(final_response)
             self._take_consumed_injections()
             self._record_response_state(final_response)

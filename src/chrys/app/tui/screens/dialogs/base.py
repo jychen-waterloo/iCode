@@ -13,6 +13,7 @@ from textual.screen import ModalScreen
 from chrys.app.tui.behaviors.click_outside_dismiss import ClickOutsideDismissMixin
 from chrys.app.tui.behaviors.insert_clipboard import INSERT_CLIPBOARD_BINDINGS, InsertClipboardScreenMixin
 from chrys.app.tui.behaviors.right_click_copy import RightClickScreenCopyMixin
+from chrys.app.tui.util.liveness import composed_live
 
 DialogResultT = TypeVar("DialogResultT")
 
@@ -52,13 +53,8 @@ class BaseDialog(
 
     @property
     def _composed_live(self) -> bool:
-        """Whether the widgets it composed are there to query and update.
-
-        Removal prunes them before the dialog unmounts, the app's shutdown included. None of them mount when the
-        dialog is pushed as the app begins to exit, or in its last running turn to mount once it stopped. Owners may
-        report to it, and it may mount, at any of those moments; nothing renders it then.
-        """
-        return self.is_attached and self.app.is_running and not self._pruning and not self._closing
+        """See :func:`composed_live`."""
+        return composed_live(self)
 
     def dismiss_when_topmost(self, result: object | None = None) -> None:
         """Retain completion while covered or mounting; never pop a screen belonging to another operation."""

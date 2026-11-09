@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from chrys.app.tui.widgets.chat.context_fold import ContextFoldWidget
@@ -20,6 +20,7 @@ from chrys.app.tui.widgets.chat.messages import (
     UserMessage,
     format_message_created_at,
     resolve_interrupted_message_copy,
+    turn_duration_ms,
 )
 from chrys.app.tui.widgets.chat.ports import ChatMountPort, TranscriptLocalizationPort, TranscriptUiPort
 from chrys.app.tui.widgets.chat.toc_model import TurnTocModel, turn_index_from_extra
@@ -39,8 +40,10 @@ from chrys.foundation.models.history_markers import (
     SUB_AGENT_STATE_DISCARDED_MESSAGE,
     HistoryMarkerKind,
 )
+from chrys.foundation.models.turns import opens_turn
 from chrys.foundation.text.images import is_image_media_type
 from chrys.foundation.tool_result_metadata import TOOL_INTERRUPTED_METADATA_KEY
+from chrys.foundation.trajectory.metadata import ANALYTICS_ITEM_ID_KEY, OPERATION_ID_KEY
 from chrys.foundation.trajectory_timing import trajectory_timing_from_metadata
 from chrys.foundation.util.time import parse_created_at
 from chrys.kernel import Content, Message
@@ -66,6 +69,7 @@ from chrys.service.agent_middleware.events.hosted_tools import (
     normalize_hosted_replay_content,
 )
 from chrys.service.agent_middleware.events.result_persistence import PERSISTED_RESULT_METADATA_KEYS
+from chrys.service.context.providers.history import TURN_STARTED_AT_KEY
 from chrys.service.llm.reasoning_display import readable_reasoning
 from chrys.service.mutations.tool_names import _FILE_TOOLS
 from chrys.service.session.message_metadata import (
@@ -79,6 +83,7 @@ from chrys.service.text_blocks import join_text_blocks, reconstruct_text_blocks,
 if TYPE_CHECKING:
     from textual.widget import Widget
 
+    from chrys.app.tui.widgets.chat.file_snapshot import FileSnapshotKey
     from chrys.foundation.models.invocations import ContentChannel
     from chrys.service.context.providers.history import CompressedBlock
 
@@ -151,6 +156,8 @@ class ReplayToolCall:
 @dataclass(frozen=True)
 class ReplayTurnMarker:
     turn_index: int | None
+    started_at: Any = None
+    """When the pass the marker ends began, which the answer before it is timed from."""
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,7 @@ class ReplayUserMessage:
     is_injection: bool = False
     profile_switch_to: str = ""
     duration_ms: int | None = None
+    item_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,8 +192,8 @@ class ReplayAgentMessage:
 class ReplayStructuredCompletion:
     """The ✓ of a turn that ended with successful structured hosted output and no answer text.
 
-    It carries the timing of the agent message whose output it completes, and
-    follows the thinking after it, as it did live.
+    It carries when the agent message whose output it completes finished, and
+    how long its turn took, and follows the thinking after it, as it did live.
     """
 
     created_at: Any = None
@@ -275,7 +283,7 @@ class HistoryReplayPlanner:
         self,
         messages: list[dict[str, Any]],
         *,
-        file_snapshots: dict[str, list[Any]] | None = None,
+        file_snapshots: dict[FileSnapshotKey, list[Any]] | None = None,
         suppress_marker_text: bool = False,
         show_reasoning: bool = False,
     ) -> ReplayPlan:
@@ -298,12 +306,12 @@ class HistoryReplayPlanner:
         self,
         messages: list[dict[str, Any]],
         *,
-        file_snapshots: dict[str, list[Any]] | None,
+        file_snapshots: dict[FileSnapshotKey, list[Any]] | None,
     ) -> tuple[dict[int, _PairedToolData], dict[int, ReplayToolCall], list[ReplayCompatibilityAnnotation]]:
         pairings: dict[int, _PairedToolData] = {}
         standalone_result_coordinates: set[tuple[int, int]] = set()
         annotations: list[ReplayCompatibilityAnnotation] = []
-        snapshot_cursors: dict[str, int] = {}
+        snapshot_cursors: dict[FileSnapshotKey, int] = {}
 
         # Exchange-scoped pairing over the serialized transcript: every
         # response sibling shares the exchange's output block, embedded
@@ -405,12 +413,16 @@ class HistoryReplayPlanner:
                     values["_replay_artifacts"] = paired.artifacts
 
                 if tool_call.get("name", "") in _FILE_TOOLS:
-                    snapshots = file_snapshots.get(call_id, []) if file_snapshots else []
-                    snapshot_index = snapshot_cursors.get(call_id, 0)
+                    operation_id = _message_extra(tool_call).get(OPERATION_ID_KEY)
+                    snapshot_key: FileSnapshotKey = (
+                        ("operation", operation_id) if isinstance(operation_id, str) and operation_id else call_id
+                    )
+                    snapshots = file_snapshots.get(snapshot_key, []) if file_snapshots else []
+                    snapshot_index = snapshot_cursors.get(snapshot_key, 0)
                     if snapshot_index < len(snapshots):
                         paired.file_snapshot = snapshots[snapshot_index]
                         values["_file_snapshot"] = paired.file_snapshot
-                        snapshot_cursors[call_id] = snapshot_index + 1
+                        snapshot_cursors[snapshot_key] = snapshot_index + 1
 
                 pairings[id(tool_call)] = paired
                 annotations.append(ReplayCompatibilityAnnotation(tool_call, values))
@@ -755,6 +767,8 @@ class HistoryReplayPlanner:
     ) -> list[ReplayEntry]:
         entries: list[ReplayEntry] = []
         seen_user_in_turn = False
+        # When the turn's opening message was sent: when its pass began, unless Continue or Retry began it later.
+        turn_opened_at: Any = None
         retry_action_marker_index = _trailing_retry_marker_index(merged)
 
         for msg_index, entry in enumerate(merged):
@@ -765,7 +779,6 @@ class HistoryReplayPlanner:
                         created_at=_message_created_at(entry.additional_properties),
                         is_intermediate=entry.is_intermediate,
                         intermediate_texts=list(entry.intermediate_texts),
-                        duration_ms=_trajectory_duration_ms(entry.additional_properties),
                     )
                 )
                 continue
@@ -778,8 +791,11 @@ class HistoryReplayPlanner:
             status_code = _recognized_status_code(extra)
 
             if marker == HistoryMarkerKind.TURN:
-                entries.append(ReplayTurnMarker(turn_index_from_extra(extra)))
+                # A marker written before turns kept when their pass began times it from the opening message.
+                started_at = extra.get(TURN_STARTED_AT_KEY) or turn_opened_at
+                entries.append(ReplayTurnMarker(turn_index_from_extra(extra), started_at=started_at))
                 seen_user_in_turn = False
+                turn_opened_at = None
                 continue
 
             if marker == HistoryMarkerKind.SUMMARY:
@@ -844,13 +860,14 @@ class HistoryReplayPlanner:
                 # "continue" and keep rendering via the positional fallback.
                 if extra.get(HistoryMarkerKind.CONTINUATION_KEY):
                     continue
-                text = "\n".join(_text_parts(contents)).strip()
+                text = contents_text(contents)
                 profile_switch_to = str(extra.get(HistoryMarkerKind.PROFILE_SWITCH_TO_KEY) or "")
                 if not text:
                     if profile_switch_to:
                         entries.append(ReplayProfileSwitch(profile_switch_to))
                     continue
                 is_injection = bool(extra.get(HistoryMarkerKind.INJECTED_KEY, False) or seen_user_in_turn)
+                item_id = extra.get(ANALYTICS_ITEM_ID_KEY)
                 entries.append(
                     ReplayUserMessage(
                         text=text,
@@ -859,22 +876,54 @@ class HistoryReplayPlanner:
                         is_injection=is_injection,
                         profile_switch_to=profile_switch_to,
                         duration_ms=_trajectory_duration_ms(extra),
+                        item_id=item_id if isinstance(item_id, str) else None,
                     )
                 )
                 if not is_injection:
                     seen_user_in_turn = True
+                if opens_turn(_TurnMessageView(role, extra)):
+                    # By its flags, not its place: a message sent after a stopped pass opens a turn of its own,
+                    # though the stopped pass left no marker before it.
+                    turn_opened_at = _message_created_at(extra)
                 continue
 
             if role == "assistant":
-                entries.append(
-                    ReplayAgentMessage(
-                        contents=list(contents),
-                        created_at=_message_created_at(extra),
-                        duration_ms=_trajectory_duration_ms(extra),
-                    )
-                )
+                entries.append(ReplayAgentMessage(contents=list(contents), created_at=_message_created_at(extra)))
 
-        return _add_structured_output_completions(entries, show_reasoning=show_reasoning)
+        return _time_turn_answers(_add_structured_output_completions(entries, show_reasoning=show_reasoning))
+
+
+@dataclass(frozen=True)
+class _TurnMessageView:
+    """A persisted message dict as :func:`opens_turn` reads it."""
+
+    role: str
+    additional_properties: dict[str, Any]
+    text: str | None = None
+
+
+def _time_turn_answers(entries: list[ReplayEntry]) -> list[ReplayEntry]:
+    """Tell on the answer each pass ended with how long its turn took, from when the pass began, as live.
+
+    The answer is the last thing the pass showed before its marker, skipping thinking and messages sent mid-turn
+    (history may place one after the answer): its text, or the ✓ of its structured output. A pass that ended
+    otherwise (interrupted, failed, awaiting sub-agents) has none to time.
+    """
+    for index, marker in enumerate(entries):
+        if not isinstance(marker, ReplayTurnMarker):
+            continue
+        before = index - 1
+        while before >= 0 and (
+            _shows_at_most_thinking(previous := entries[before])
+            or (isinstance(previous, ReplayUserMessage) and previous.is_injection)
+        ):
+            before -= 1
+        answer = entries[before] if before >= 0 else None
+        if isinstance(answer, ReplayStructuredCompletion) or (
+            isinstance(answer, ReplayAgentMessage) and not answer.is_status
+        ):
+            entries[before] = replace(answer, duration_ms=turn_duration_ms(marker.started_at, answer.created_at))
+    return entries
 
 
 def _add_structured_output_completions(entries: list[ReplayEntry], *, show_reasoning: bool) -> list[ReplayEntry]:
@@ -906,7 +955,7 @@ def _add_structured_output_completions(entries: list[ReplayEntry], *, show_reaso
             after = candidate_index
             while after + 1 < len(entries) and _shows_at_most_thinking(entries[after + 1]):
                 after += 1
-            completions[after] = ReplayStructuredCompletion(candidate.created_at, candidate.duration_ms)
+            completions[after] = ReplayStructuredCompletion(candidate.created_at)
         candidate_index = None
 
     for index, entry in enumerate(entries):
@@ -982,10 +1031,13 @@ class HistoryReplayRenderer:
         default_profile: Callable[[], str],
         localization: TranscriptLocalizationPort | None = None,
         tool_widget_configurator: Callable[[Widget], None] | None = None,
+        workspace_cwd: Callable[[], str] | None = None,
         show_reasoning: bool = False,
         fold_passed_text: bool = False,
+        rollback_targets: Callable[[], set[int]] | None = None,
     ) -> None:
         self._mount = mount
+        self._workspace_cwd = workspace_cwd
         self._ui = ui
         self._toc = toc
         self._tool_kind_resolver = tool_kind_resolver
@@ -997,13 +1049,14 @@ class HistoryReplayRenderer:
         """Whether text between tool calls starts folded, as the live text it was folded once the turn moved on."""
         self._resolve_message = localization.render if localization is not None else format_message
         self._planner = HistoryReplayPlanner()
+        self._rollback_targets = rollback_targets or set
 
     async def replay_history(
         self,
         messages: list[dict[str, Any]],
         *,
         initial_profile: str = "",
-        file_snapshots: dict[str, list[Any]] | None = None,
+        file_snapshots: dict[FileSnapshotKey, list[Any]] | None = None,
         compressed_blocks: dict[str, CompressedBlock] | None = None,
     ) -> None:
         """Replay saved session messages into the chat transcript."""
@@ -1016,10 +1069,17 @@ class HistoryReplayRenderer:
         seen_user_in_turn = False
         widgets: list[Widget] = []
         process_failures_after: list[Widget] = []
+        turn_user: UserMessage | None = None
 
         for entry in plan.entries:
             if isinstance(entry, ReplayTurnMarker):
                 self._toc.apply_turn_marker(entry.turn_index)
+                if turn_user is not None and entry.turn_index is not None:
+                    turn_user.turn_number = entry.turn_index
+                    turn_user.set_rollback_available(
+                        UserMessage.undo_link_available(entry.turn_index, self._rollback_targets())
+                    )
+                turn_user = None
                 seen_user_in_turn = False
                 continue
 
@@ -1032,6 +1092,7 @@ class HistoryReplayRenderer:
                         widgets=widgets,
                         show_reasoning=show_reasoning,
                         process_failures_after=process_failures_after,
+                        file_snapshots=file_snapshots,
                     )
                 freed_messages = len(block.messages) if block else 0
                 turn_range = block.turn_range if block else (0, 0)
@@ -1056,7 +1117,13 @@ class HistoryReplayRenderer:
                 if entry.action_label is not None:
                     action_label = self._resolve_message(entry.action_label.bind())
                 widgets.append(
-                    InterruptedMessage(copy.reason, entry.source, action_label=action_label, header=copy.header)
+                    InterruptedMessage(
+                        copy.reason,
+                        entry.source,
+                        action_label=action_label,
+                        header=copy.header,
+                        offers_discard=entry.action_label is INTERRUPTED_CONTINUE_ACTION_MESSAGE,
+                    )
                 )
                 continue
 
@@ -1071,14 +1138,19 @@ class HistoryReplayRenderer:
                         timestamp=format_message_created_at(entry.created_at),
                         is_injection=True,
                         contents=entry.contents,
+                        history_item_id=entry.item_id,
                     )
                 else:
-                    turn_id, _item = self._toc.begin_user_turn(entry.text)
+                    turn_id, _item = self._toc.begin_replayed_turn(entry.text)
                     widget = UserMessage(
                         entry.text,
                         timestamp=format_message_created_at(entry.created_at),
                         contents=entry.contents,
+                        turn_number=_item.turn_index,
+                        rollback_available=UserMessage.undo_link_available(_item.turn_index, self._rollback_targets()),
+                        history_item_id=entry.item_id,
                     )
+                    turn_user = widget
                     seen_user_in_turn = True
                 widget.id = turn_id
                 widgets.append(widget)
@@ -1149,14 +1221,24 @@ class HistoryReplayRenderer:
         widgets: list[Widget] | None = None,
         show_reasoning: bool = False,
         process_failures_after: list[Widget] | None = None,
+        file_snapshots: dict[FileSnapshotKey, list[Any]] | None = None,
     ) -> str:
         """Render a compressed block through the canonical replay planner."""
         replay_widgets = widgets if widgets is not None else []
         failure_anchors = process_failures_after if process_failures_after is not None else []
         serialized_messages = [message.to_dict() for message in block.messages]
-        plan = self._planner.build_plan(serialized_messages, suppress_marker_text=True, show_reasoning=show_reasoning)
+        operation_snapshots: dict[FileSnapshotKey, list[Any]] = {
+            key: values for key, values in (file_snapshots or {}).items() if isinstance(key, tuple)
+        }
+        plan = self._planner.build_plan(
+            serialized_messages,
+            file_snapshots=operation_snapshots,
+            suppress_marker_text=True,
+            show_reasoning=show_reasoning,
+        )
         plan.apply_compatibility_annotations()
         seen_user_in_turn = False
+        turn_user: UserMessage | None = None
         for entry in plan.entries:
             if isinstance(entry, ReplayInterrupted | ReplaySuppressedStatus):
                 # Omitted prose still ends the preceding activity unsuccessfully.
@@ -1168,6 +1250,12 @@ class HistoryReplayRenderer:
 
             if isinstance(entry, ReplayTurnMarker):
                 self._toc.apply_turn_marker(entry.turn_index)
+                if turn_user is not None and entry.turn_index is not None:
+                    turn_user.turn_number = entry.turn_index
+                    turn_user.set_rollback_available(
+                        UserMessage.undo_link_available(entry.turn_index, self._rollback_targets())
+                    )
+                turn_user = None
                 seen_user_in_turn = False
                 continue
 
@@ -1187,15 +1275,20 @@ class HistoryReplayRenderer:
                         compressed=True,
                         is_injection=True,
                         contents=entry.contents,
+                        history_item_id=entry.item_id,
                     )
                 else:
-                    turn_id, _item = self._toc.begin_user_turn(entry.text, compressed=True)
+                    turn_id, _item = self._toc.begin_replayed_turn(entry.text, compressed=True)
                     widget = UserMessage(
                         entry.text,
                         timestamp=format_message_created_at(entry.created_at),
                         compressed=True,
                         contents=entry.contents,
+                        turn_number=_item.turn_index,
+                        rollback_available=UserMessage.undo_link_available(_item.turn_index, self._rollback_targets()),
+                        history_item_id=entry.item_id,
                     )
+                    turn_user = widget
                     seen_user_in_turn = True
                 widget.id = turn_id
                 replay_widgets.append(widget)
@@ -1214,18 +1307,8 @@ class HistoryReplayRenderer:
                     for text in entry.intermediate_texts
                     if text.strip()
                 )
-                visible_contents = [
-                    content
-                    for content in entry.contents
-                    if not isinstance(content, ReplayToolCall)
-                    or content.provider_hosted
-                    or (
-                        content.source.get("type") == "function_call"
-                        and content.source.get("informational_only") is True
-                    )
-                ]
                 await self._replay_assistant(
-                    visible_contents,
+                    entry.contents,
                     profile_name=replay_profile,
                     is_intermediate=entry.is_intermediate,
                     created_at=entry.created_at,
@@ -1259,7 +1342,7 @@ class HistoryReplayRenderer:
         """Replay a single assistant message, preserving text/thinking/tool-call order."""
         replay_widgets = widgets if widgets is not None else []
         pending_text: list[tuple[str, str | None]] = []
-        # The segment the pending text was shown in: one bubble per segment, as a bare Continue may withdraw each.
+        # The segment the pending text was shown in: one bubble per segment, as a Continue or steer may withdraw each.
         pending_segment: str | None = None
         pending_tools: list[ReplayToolCall | dict[str, Any]] = []
         pending_thinking: list[str] = []
@@ -1311,7 +1394,12 @@ class HistoryReplayRenderer:
         async def flush_tools() -> None:
             if not pending_tools:
                 return
-            group = ToolGroup(live=False, tool_widget_configurator=self._tool_widget_configurator)
+            group = ToolGroup(
+                live=False,
+                tool_widget_configurator=self._tool_widget_configurator,
+                workspace_cwd=self._workspace_cwd,
+                is_compressed=is_compressed,
+            )
             for idx, tc in enumerate(pending_tools):
                 if isinstance(tc, ReplayToolCall):
                     name = tc.name
@@ -1775,6 +1863,11 @@ def _visible_text_variants(contents: list[Any]) -> list[str]:
         variants.append("\n".join(all_parts).strip())
         variants.append("".join(all_parts).strip())
     return [text for text in variants if text]
+
+
+def contents_text(contents: list[Any]) -> str:
+    """A user message's text as its contents hold it: what the model received, shown live and on replay alike."""
+    return "\n".join(_text_parts(contents)).strip()
 
 
 def _text_parts(contents: list[Any]) -> list[str]:

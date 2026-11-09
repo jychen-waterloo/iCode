@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypedDict, Unpack
 
 import pytest
 from textual.widget import Widget
@@ -131,8 +132,16 @@ class _FakeQuery:
         return list(self.children)
 
 
+class _ToolGroupOptions(TypedDict, total=False):
+    """The keywords the registry builds a ``ToolGroup`` with."""
+
+    tool_widget_configurator: Callable[[Widget], None] | None
+    workspace_cwd: Callable[[], str] | None
+
+
 class _FakeToolGroup:
-    def __init__(self) -> None:
+    def __init__(self, **options: Unpack[_ToolGroupOptions]) -> None:
+        self.options = options
         self.added: list[tuple[str, str, str]] = []
         self.completed: list[str] = []
         self.progress: list[str] = []
@@ -573,8 +582,8 @@ async def test_tool_registry_delayed_start_does_not_clobber_reused_call_id(
     instances: list[_FakeToolGroup] = []
 
     class _FirstAddBlocksToolGroup(_FakeToolGroup):
-        def __init__(self) -> None:
-            super().__init__()
+        def __init__(self, **options: Unpack[_ToolGroupOptions]) -> None:
+            super().__init__(**options)
             instances.append(self)
             self._blocks = len(instances) == 1
 
@@ -628,8 +637,8 @@ async def test_tool_registry_delayed_start_supersedes_older_reused_call_id_owner
     instances: list[_FakeToolGroup] = []
 
     class _SecondAddBlocksToolGroup(_FakeToolGroup):
-        def __init__(self) -> None:
-            super().__init__()
+        def __init__(self, **options: Unpack[_ToolGroupOptions]) -> None:
+            super().__init__(**options)
             instances.append(self)
             self._blocks = len(instances) == 2
 
@@ -684,8 +693,8 @@ async def test_tool_registry_result_racing_replacement_start_routes_to_new_card(
     instances: list[_FakeToolGroup] = []
 
     class _SecondAddBlocksToolGroup(_FakeToolGroup):
-        def __init__(self) -> None:
-            super().__init__()
+        def __init__(self, **options: Unpack[_ToolGroupOptions]) -> None:
+            super().__init__(**options)
             instances.append(self)
             self._blocks = len(instances) == 2
 
@@ -1036,8 +1045,8 @@ async def test_tool_registry_concurrent_start_waits_for_group_mount(
             return mounted
 
     class _MountAwareToolGroup(_FakeToolGroup):
-        def __init__(self) -> None:
-            super().__init__()
+        def __init__(self, **options: Unpack[_ToolGroupOptions]) -> None:
+            super().__init__(**options)
             self.mount_completed = False
 
         async def add_tool(
@@ -1152,7 +1161,7 @@ def test_tool_registry_inline_ask_user_scrolls_only_after_success(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_live_renderer_uses_status_port_for_failed_turn_cleanup() -> None:
+async def test_live_renderer_only_removes_status_until_backend_cleanup() -> None:
     calls: list[str] = []
     status = _FakeStatus(calls)
     error = ErrorMessage("failed")
@@ -1181,10 +1190,11 @@ async def test_live_renderer_uses_status_port_for_failed_turn_cleanup() -> None:
 
     await renderer.add_user_message("new prompt")
 
-    assert calls[:5] == ["dismiss_welcome", "live_user_started", "failed_status", "preceding_content", "remove_error"]
-    assert "remove_user" in calls
-    assert len(toc.items()) == 1
-    assert toc.items()[0].summary == "new prompt"
+    assert calls[:4] == ["dismiss_welcome", "live_user_started", "failed_status", "remove_error"]
+    assert "preceding_content" not in calls
+    assert "remove_user" not in calls
+    assert [item.summary for item in toc.items()] == ["prompt", "new prompt"]
+    assert toc.items()[-1].turn_index is None
 
 
 @pytest.mark.asyncio
@@ -1563,7 +1573,7 @@ async def test_replay_compressed_block_preserves_hosted_images_and_artifacts() -
 
 
 @pytest.mark.asyncio
-async def test_replay_compressed_block_keeps_local_tools_hidden() -> None:
+async def test_replay_compressed_block_keeps_local_tool_and_result_in_a_dimmed_group() -> None:
     calls: list[str] = []
     mount = _FakeMount(calls)
     renderer = HistoryReplayRenderer(
@@ -1589,7 +1599,12 @@ async def test_replay_compressed_block_keeps_local_tools_hidden() -> None:
         compressed_blocks={"ctx-local-tool": block},
     )
 
-    assert not any(isinstance(widget, ToolGroup) for widget in mount.widgets)
+    groups = [widget for widget in mount.widgets if isinstance(widget, ToolGroup)]
+    assert len(groups) == 1
+    assert groups[0].has_class("--compressed")
+    assert [(record.tool_name, record.result) for record in groups[0]._tool_records.values()] == [
+        ("read_file", "contents")
+    ]
 
 
 @pytest.mark.asyncio
@@ -1599,7 +1614,7 @@ async def test_replay_compressed_block_skips_tool_summary_but_keeps_archived_ori
 
     Unlike the session transcript, which loads without excluded messages,
     the block renders those originals by its own rules: their narration
-    shows and local tool cards stay hidden. Only the summary is skipped; a
+    and local tool cards both show. Only the summary is skipped; a
     real answer that reads exactly like it still renders.
     """
     calls: list[str] = []
@@ -1656,7 +1671,12 @@ async def test_replay_compressed_block_skips_tool_summary_but_keeps_archived_ori
         "Reading a.py first.",
         summary_text,
     ]
-    assert not any(isinstance(widget, ToolGroup) for widget in mount.widgets)
+    groups = [widget for widget in mount.widgets if isinstance(widget, ToolGroup)]
+    assert len(groups) == 1
+    assert groups[0].has_class("--compressed")
+    assert [(record.tool_name, record.result) for record in groups[0]._tool_records.values()] == [
+        ("read_file", "contents")
+    ]
 
 
 @pytest.mark.asyncio

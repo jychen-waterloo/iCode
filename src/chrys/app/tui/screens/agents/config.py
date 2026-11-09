@@ -26,17 +26,19 @@ from textual.widgets.option_list import Option, OptionDoesNotExist
 from chrys.app.tui.binding_display import CANCEL_BINDING, localized_binding
 from chrys.app.tui.i18n import render_str, widget_locale_controller, widget_localizer
 from chrys.app.tui.screens.agents.agent_draft_store import AgentDraftStore, mcp_draft_errors_by_server
-from chrys.app.tui.screens.agents.panels.config_card import CardListChanged
 from chrys.app.tui.screens.agents.validation_messages import FIX_VALIDATION_ERRORS
 from chrys.app.tui.screens.dialogs.base import BaseDialog
 from chrys.app.tui.widgets import Checkbox
 from chrys.app.tui.widgets import EnhancedInput as Input
+from chrys.app.tui.widgets.config_card import CardListChanged
 from chrys.foundation.i18n import DisplayBlock, MessageDef, MessageRef, msg
 
 if TYPE_CHECKING:
     from textual.app import ComposeResult
     from textual.widget import Widget
 
+    from chrys.app.tui.screens.agents.mcp_choices import MCPChoices
+    from chrys.app.tui.screens.agents.panels.tools import ToolSelection
     from chrys.service.profiles.agents.registry import AgentProfileRegistry, AgentProfileRegistrySnapshot
     from chrys.service.profiles.agents.schema import AgentProfile
     from chrys.service.profiles.models.registry import ModelProfileRegistry
@@ -72,7 +74,7 @@ _RESET_AGENT_MESSAGE = msg(
     "tui.agent_config.confirm.reset.message",
     fallback=(
         'Reset built-in agent\n"{display}" to system defaults?\n\n'
-        "Skills, MCP, and Memory settings will be preserved. All other changes will be discarded."
+        "Skills, MCP, Memory, and Extensions settings will be preserved. All other changes will be discarded."
     ),
     multiline=True,
 )
@@ -171,6 +173,11 @@ class _AgentSaveSnapshot:
 
 class _AgentConfigPanelsNotReady(RuntimeError):
     """Raised when a panel exists but its child widgets have not mounted yet."""
+
+
+def _apply_tool_selection(profile: AgentProfile, selection: ToolSelection) -> None:
+    profile.tools.builtins = selection.builtins
+    profile.extensions = selection.extensions
 
 
 class AgentsConfigScreen(BaseDialog[str]):
@@ -376,11 +383,11 @@ class AgentsConfigScreen(BaseDialog[str]):
     @staticmethod
     def _canonicalize_profile_for_ui(profile) -> None:
         """Match harmless normalizations done by tab panels (ordering)."""
-        from chrys.app.tui.screens.agents.panels.tools import _ALL_CATEGORIES
+        from chrys.app.tui.screens.agents.panels.tools import SWITCHABLE_PACKS
 
         enabled = set(profile.tools.builtins)
-        known = {cat for cat, _label, _desc, _enabled in _ALL_CATEGORIES}
-        ordered = [cat for cat, _label, _desc, _enabled in _ALL_CATEGORIES if cat in enabled]
+        known = {cat for cat, *_ in SWITCHABLE_PACKS}
+        ordered = [cat for cat, *_ in SWITCHABLE_PACKS if cat in enabled]
         ordered.extend(cat for cat in profile.tools.builtins if cat not in known)
         profile.tools.builtins = ordered
         profile.skills.script_extensions = sorted(profile.skills.script_extensions)
@@ -682,7 +689,7 @@ class AgentsConfigScreen(BaseDialog[str]):
 
         pane = self.query_one("#tools", TabPane)
         pane.remove_children()
-        pane.mount(ToolsConfigPanel(profile.tools, read_only=self._read_only))
+        pane.mount(ToolsConfigPanel(profile.tools, extensions=profile.extensions, read_only=self._read_only))
 
     def _mount_subagents_tab(self, profile) -> None:
         from chrys.app.tui.screens.agents.panels.subagents import SubAgentsConfigPanel
@@ -753,7 +760,16 @@ class AgentsConfigScreen(BaseDialog[str]):
                 workspace_cwd=self._workspace_cwd,
                 read_only=self._read_only,
                 additional_reserved_tool_names=self._selected_sub_agent_tool_names,
+                reuse_choices=self._mcp_reuse_choices,
             )
+        )
+
+    def _mcp_reuse_choices(self) -> MCPChoices:
+        """Offer the latest other drafts, including unsaved and sub-agent-only profiles."""
+        from chrys.app.tui.screens.agents.mcp_choices import collect_mcp_choices
+
+        return collect_mcp_choices(
+            draft.profile for draft in self._visible_drafts() if draft.key != self._selected_draft_key
         )
 
     def _selected_sub_agent_tool_names(self) -> set[str]:
@@ -1076,6 +1092,7 @@ class AgentsConfigScreen(BaseDialog[str]):
         profile.sub_agent_only = True
         profile.instructions = ""
         profile.tools = ToolsConfig()
+        profile.extensions = []
         profile.skills = SkillsConfig()
         profile.sub_agents = SubAgentsConfig()
         profile.memory = MemoryConfig()
@@ -1105,14 +1122,13 @@ class AgentsConfigScreen(BaseDialog[str]):
 
     @staticmethod
     def _is_config_mutation_button(button_id: str) -> bool:
-        # Not "mcp-delete-btn-": that press opens a confirmation, and the panel
-        # posts CardListChanged once a confirmed delete lands.
+        # MCP add/delete presses may only open a dialog; CardListChanged marks
+        # the draft dirty once an actual insertion or confirmed deletion lands.
         if button_id in {
             "sa-add-btn",
             "mem-add-file",
             "mem-add-folder",
             "sk-add-btn",
-            "mcp-add-btn",
             "acp-add-arg",
             "acp-add-env",
             "acp-add-option",
@@ -1863,7 +1879,7 @@ class AgentsConfigScreen(BaseDialog[str]):
                 InstructionsConfigPanel,
                 lambda p, cfg: setattr(p, "instructions", cfg),
             ),
-            ("tools", _TAB_TOOLS, ToolsConfigPanel, lambda p, cfg: setattr(p.tools, "builtins", cfg)),
+            ("tools", _TAB_TOOLS, ToolsConfigPanel, _apply_tool_selection),
             ("sub-agents", _TAB_SUB_AGENTS, SubAgentsConfigPanel, lambda p, cfg: setattr(p, "sub_agents", cfg)),
             ("skills", _TAB_SKILLS, SkillsConfigPanel, lambda p, cfg: setattr(p, "skills", cfg)),
             ("mcp", _TAB_MCP, MCPConfigPanel, lambda p, cfg: setattr(p.tools, "mcp", cfg)),
@@ -2068,19 +2084,21 @@ class AgentsConfigScreen(BaseDialog[str]):
         target_names.update(
             profile.name for profile in retargeted_profiles if self._should_persist_retargeted_profile(profile)
         )
-        snapshot = self._snapshot_save_state(old_names | target_names)
+        from chrys.service.profiles.agents.serializer import profile_write_lock
 
-        try:
-            active_new_display, active_new_name = self._perform_save(
-                dirty_drafts,
-                retargeted_profiles,
-                old_names=old_names,
-                target_names=target_names,
-                old_active_name=old_active_name,
-            )
-        except Exception:
-            self._restore_save_state(snapshot)
-            raise
+        with profile_write_lock:
+            snapshot = self._snapshot_save_state(old_names | target_names)
+            try:
+                active_new_display, active_new_name = self._perform_save(
+                    dirty_drafts,
+                    retargeted_profiles,
+                    old_names=old_names,
+                    target_names=target_names,
+                    old_active_name=old_active_name,
+                )
+            except Exception:
+                self._restore_save_state(snapshot)
+                raise
 
         if active_new_display is not None:
             self._current_profile = active_new_display

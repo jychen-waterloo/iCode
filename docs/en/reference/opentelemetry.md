@@ -14,7 +14,7 @@ This page covers iCode OpenTelemetry configuration, local storage and export of 
 
 ### Enablement settings
 
-OpenTelemetry is disabled by default. Enable it under [Settings → Security → Telemetry](../guides/configuration/settings.md#telemetry) in the terminal user interface (TUI), or use the following environment variables. **All settings on this page take effect after restarting iCode.**
+OpenTelemetry is disabled by default. Enable it under [Settings → Safety → Telemetry](../guides/configuration/settings.md#telemetry) in the terminal user interface (TUI), or use the following environment variables. **All settings on this page take effect after restarting iCode.**
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ Before enabling this option, confirm the data storage location, access permissio
 
 Remote export requires a running OTLP collector that accepts OTLP/gRPC. Use the endpoint and authentication information provided by the collector when configuring the connection.
 
-The standard `OTEL_*` variables below can also be set in a `.env` file in the working directory or in the user `.env` file (macOS / Linux: `~/.chrys/.env`; Windows: `%APPDATA%\chrys\.env`). At startup, values from these files replace variables of the same name exported in the shell.
+Set the standard `OTEL_*` variables below in the environment that starts iCode. Changes take effect after restarting iCode; `.env` files are not loaded.
 
 ### Endpoint precedence
 

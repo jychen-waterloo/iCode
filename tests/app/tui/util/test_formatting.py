@@ -7,7 +7,15 @@ from __future__ import annotations
 import pytest
 from rich.text import Text
 
-from chrys.app.tui.util.formatting import format_token_count, format_typed_count, with_count_hint
+from chrys.app.tui.util.formatting import (
+    elapsed_parts,
+    format_byte_size,
+    format_compact_count,
+    format_elapsed,
+    format_token_count,
+    format_typed_count,
+    with_count_hint,
+)
 
 
 @pytest.mark.parametrize(
@@ -27,6 +35,43 @@ from chrys.app.tui.util.formatting import format_token_count, format_typed_count
 )
 def test_format_token_count_uses_compact_units_without_rounded_overflow(value: int, expected: str) -> None:
     assert format_token_count(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (0, "0 B"),
+        (1_023, "1023 B"),
+        (1_024, "1.0 KB"),
+        (1_048_524, "1023.9 KB"),
+        (1_048_525, "1.0 MB"),
+        (1_048_575, "1.0 MB"),
+        (1_048_576, "1.0 MB"),
+        (1_073_689_395, "1023.9 MB"),
+        (1_073_689_396, "1.0 GB"),
+        (1_073_741_823, "1.0 GB"),
+        (1_073_741_824, "1.0 GB"),
+    ],
+)
+def test_format_byte_size_switches_unit_before_rounding_reads_1024(value: int, expected: str) -> None:
+    assert format_byte_size(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (500, "500"),
+        (1_000, "1k"),
+        (12_200, "12.2k"),
+        (200_000, "200k"),
+        (999_949, "999.9k"),
+        (999_950, "1.0m"),
+        (1_000_000, "1m"),
+        (1_500_000, "1.5m"),
+    ],
+)
+def test_format_compact_count_switches_unit_before_rounding_reads_1000(value: int, expected: str) -> None:
+    assert format_compact_count(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -96,3 +141,22 @@ def test_with_count_hint_returns_the_label_unchanged_below_one_thousand_or_for_n
     assert with_count_hint(label, raw) is label
     assert label.plain == "Max"
     assert label.spans == []
+
+
+@pytest.mark.parametrize(
+    ("seconds", "parts", "compact"),
+    [
+        (-1.0, ((0, "ms"),), "0ms"),
+        (0.0, ((0, "ms"),), "0ms"),
+        (0.412, ((412, "ms"),), "412ms"),
+        (0.9999, ((999, "ms"),), "999ms"),
+        (1.0, ((1, "s"),), "1s"),
+        (59.9, ((59, "s"),), "59s"),
+        (65.0, ((1, "m"), (5, "s")), "1m 05s"),
+    ],
+)
+def test_elapsed_parts_spans_milliseconds_through_days(
+    seconds: float, parts: tuple[tuple[int, str], ...], compact: str
+) -> None:
+    assert elapsed_parts(seconds) == parts
+    assert format_elapsed(seconds) == compact

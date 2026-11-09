@@ -8,7 +8,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,6 +36,7 @@ from chrys.app.tui.screens.main.ports import (
 )
 from chrys.app.tui.screens.main.runtime_info import RegistryRuntimeInfoProvider, enabled_hook_count
 from chrys.app.tui.screens.main.session_title import QUESTION_MARK, RETRY_MARK, AttentionMark
+from chrys.app.tui.screens.main.settings_coordinator import SETTINGS_TITLE
 from chrys.app.tui.screens.main.state import MainScreenServices, MainScreenState
 from chrys.app.tui.support.gc_freeze import (
     GcAbsorbReason,
@@ -50,6 +51,7 @@ from chrys.app.tui.widgets.chat.agent_transcript_surface import AnswerSegments
 from chrys.app.tui.widgets.chat.file_snapshot import FileSnapshotPayload, FileSnapshotRef, should_externalize_snapshot
 from chrys.app.tui.widgets.chrome.app_header import APPROVAL_MODE_MESSAGES
 from chrys.app.tui.widgets.chrome.input_bar import INPUT_RETRY
+from chrys.app.tui.widgets.chrome.prompt_draft import ChatDraft
 from chrys.app.tui.widgets.chrome.status_bar import (
     STATUS_COMPACTING,
     STATUS_ERROR,
@@ -99,16 +101,20 @@ from chrys.foundation.events.types import (
     InvocationResumed,
     InvocationRetryAttempt,
     InvocationStarted,
+    InvocationSteered,
     InvocationToolCallArgsUpdated,
     InvocationToolCallProgress,
     InvocationToolCallResult,
     InvocationToolCallStart,
     InvocationToolCallStatusUpdated,
     QuestionToUser,
+    RollbackSnapshotsChanged,
     SessionReady,
     SettingsReloaded,
     TodoListUpdated,
     ToolCompacted,
+    TurnStarted,
+    UnansweredInputDropped,
     UsageUpdate,
     UserInjectResult,
     Warning,
@@ -119,6 +125,7 @@ from chrys.foundation.i18n.formatting import format_message
 from chrys.foundation.models.approval_reuse import ReuseChoice
 from chrys.foundation.models.ask_user import AskUserAnswer
 from chrys.foundation.models.hook_confirmations import HookConfirmationAnswer
+from chrys.foundation.text.draft_references import DraftReferences, image_labels_to_paths
 from chrys.foundation.tool_result_metadata import canonical_tool_result_status
 from chrys.orchestration.engine.run.attachments import replace_image_mentions_with_paths
 from chrys.service.approval.policy import ApprovalMode
@@ -139,13 +146,24 @@ _IMAGE_WARNING_CODES = {
 }
 _SUBMIT_BLOCKING_WARNING_CODES = _IMAGE_WARNING_CODES | {"sub_agent_paused"}
 _WORKING_DIR_MISSING_CODE = "working_dir_missing"
+_SHORTCUT_UNAVAILABLE_CODE = "prompt_shortcut_unavailable"
 _SUBMIT_BLOCKING_ERROR_CODES = _IMAGE_ERROR_CODES | {
     "hook_blocked",
     "not_ready",
     "prompt_admission_conflict",
     "retry_missing_user_anchor",
     _WORKING_DIR_MISSING_CODE,
+    # A prompt shortcut's message: its commands failed, its shortcut is gone from this
+    # working folder, or a turn started meanwhile; or the switch it asked for named
+    # an agent or model that is gone.
+    "prompt_shortcut_command_failed",
+    _SHORTCUT_UNAVAILABLE_CODE,
+    "prompt_shortcut_busy",
+    "profile_not_found",
+    "model_profile_not_found",
 }
+_REBUILD_REFUSED_PREFIX = "runtime_mutation_"
+"""The engine's refusals of a rebuild it may not make now; inside a submit, only its switch makes one."""
 _STALE_RUN_FILTERED_ERROR_CODES = {"executor_error", "retry_missing_user_anchor"}
 
 
@@ -228,9 +246,13 @@ class BackendEventCallbacks:
     refresh_notification_settings: Callable[[], None]
     refresh_trajectory_verify_commands: Callable[[], None]
     settings_reloaded: Callable[[], None]
+    follow_manual_reload: Callable[[], None] = lambda: None
     accept_approval_update: Callable[[ApprovalModeUpdated], bool] = lambda _event: True
     route_session_error: Callable[[Error], bool] = lambda _event: False
     prompt_missing_working_dir: Callable[[MissingDirReason], None] = lambda _reason: None
+
+    refresh_diff_preview: Callable[[bool], None] = lambda _reread: None
+    refresh_rollback_targets: Callable[[], object] = lambda: None
 
 
 def _usage_source_debug_suffix(source_id: str, *, main_source_id: str) -> str:
@@ -391,7 +413,9 @@ class BackendEventHandler:
         | InvocationContentDelta
         | InvocationContentFinished
         | InvocationContentAbandoned
-        | Error,
+        | Error
+        | UnansweredInputDropped
+        | TurnStarted,
     ) -> bool:
         """Return whether *event* was sourced before the current UI run."""
         started_at = self._state.run.started_at
@@ -860,7 +884,7 @@ class BackendEventHandler:
         s = self
 
         label = event.display_name or event.agent_profile
-        if label:
+        if label and not (event.operation == "settings_reload" and self._state.runtime.details_confirmed):
             s.profile = label
             with contextlib.suppress(Exception):
                 s.update_subtitle()
@@ -901,6 +925,7 @@ class BackendEventHandler:
             self._state.runtime.keep_hook_snapshot_of(s.main_usage_source_id)
             self.refresh_hook_indicator()
         s.profile = event.display_name or event.agent_profile
+        self._state.runtime.profile_name = event.agent_profile
         s.runtime_metadata = event.runtime_details
         self._state.runtime.details_confirmed = True
         if event.runtime_details.model.selection_source == "active":
@@ -1004,12 +1029,13 @@ class BackendEventHandler:
             session_id=event.session_id or "",
             used_at=event.timestamp,
         )
+        self._callbacks.refresh_diff_preview(True)
         s.debug("SessionReady", f"{event.agent_profile} [{session_short_id(event.session_id or '')}]")
         if not s.restoring_session:
             self.finish_agent_load(_FINISH_SESSION_READY.bind(profile=s.profile))
             self._callbacks.post_gc_message(GcReclaimRequested(GcReclaimReason.SESSION_READY, prompt=True))
 
-    async def on_settings_reloaded(self, _event: SettingsReloaded) -> None:
+    async def on_settings_reloaded(self, event: SettingsReloaded) -> None:
         """Route the LIVE tier: re-project what a reload only installed.
 
         A reload replaces the settings in the shared handle, but a LIVE field
@@ -1018,13 +1044,21 @@ class BackendEventHandler:
         until someone projects again. RELOAD fields need nothing here (the
         rebuild re-read them), and RESTART fields were held back by the
         reload's own routing.
+
+        A manual reload also follows the theme, locale and keymap, which an
+        ordinary one leaves as the launch set them. First, so its report reads
+        in the locale it just put in force.
         """
+        if event.manual:
+            self._callbacks.follow_manual_reload()
         self._callbacks.refresh_notification_settings()
         self._callbacks.refresh_trajectory_verify_commands()
         # The Settings panel projects written-but-not-yet-live values; a
         # reload is when the live values catch up (or an unrelated reload
         # arrives), so it re-reads and, for its own reload, takes the ack.
         self._callbacks.settings_reloaded()
+        for line in event.report:
+            self.notify(line, title=SETTINGS_TITLE.bind(), timeout=6)
 
     async def on_agent_runtime_updated(self, event: AgentRuntimeUpdated) -> None:
         """Refresh runtime details and the persistent status-bar counts."""
@@ -1041,6 +1075,30 @@ class BackendEventHandler:
         )
         self._ui().set_tool_info(trail)
 
+    async def on_unanswered_input_dropped(self, event: UnansweredInputDropped) -> None:
+        """Apply cleanup only after the accepted opener has mounted."""
+        await self.apply_turn_event(event)
+
+    async def on_turn_started(self, event: TurnStarted) -> None:
+        """Use the backend's index and item for a fresh opener; a retry keeps its opener and names its guidance."""
+        await self.apply_turn_event(event)
+
+    async def apply_turn_event(self, event: UnansweredInputDropped | TurnStarted) -> None:
+        """Filter and apply a live or deferred turn fact through the same render gate."""
+        if self._predates_active_run(event) or (event.session_id or "") != self._ui().chat_session_id():
+            return
+        if self._state.render_gate.defers(event):
+            self._state.render_gate.defer(event)
+            return
+        if isinstance(event, UnansweredInputDropped):
+            await self._ui().apply_fresh_turn_cleanup(
+                retired_previous_turn=event.retired_previous_turn, removed_item_ids=event.removed_item_ids
+            )
+        elif event.is_retry:
+            self._ui().apply_retry_started(event.note_message_id, event.opening_item_id)
+        else:
+            self._ui().apply_turn_started(event.turn_number, opening_item_id=event.opening_item_id)
+
     async def on_agent_thinking(self, _event: AgentThinking) -> None:
         s = self
         if not s.agent_running:
@@ -1048,6 +1106,12 @@ class BackendEventHandler:
 
         self._ui().show_status(STATUS_THINKING.bind())
         s.debug("AgentThinking")
+
+    async def on_rollback_snapshots_changed(self, event: RollbackSnapshotsChanged) -> None:
+        """Refresh only the current session's retained rollback targets."""
+        if (event.session_id or "") != self._ui().chat_session_id():
+            return
+        self._callbacks.refresh_rollback_targets()
 
     def _admits_turn_render(
         self,
@@ -1083,9 +1147,11 @@ class BackendEventHandler:
             else:
                 ui.finish_thinking_segment(event.segment_id)
         elif event.channel == "answer":
+            ui.note_output_text(event.text)
             ui.show_status(STATUS_STREAMING.bind())
             await ui.add_answer_delta(event.segment_id, event.text)
         else:
+            ui.note_output_text(event.text)
             ui.show_status(STATUS_THINKING.bind())
             await ui.add_thinking_delta(event.segment_id, event.channel, event.text)
 
@@ -1108,6 +1174,8 @@ class BackendEventHandler:
                 event.text,
                 structured_output_completed=event.structured_output_completed,
                 created_at=event.timestamp,
+                # Sent, Continue or Retry: the backend keeps this instant on the turn, for replay to time it alike.
+                turn_started_at=self._state.run.started_at,
             )
         finally:
             if self._state.run.generation == terminal_generation and s.agent_running:
@@ -1140,7 +1208,7 @@ class BackendEventHandler:
                 # a turn result that lands meanwhile.
                 if s.agent_running:
                     ui.set_terminal_title_for_user_message(event.text)
-                await ui.add_user_injection(event.text, created_at=event.created_at)
+                await ui.add_user_injection(event.text, created_at=event.created_at, item_id=event.item_id)
                 s.update_toc()
                 s.debug("UserInjectResult", "consumed" if owns_input else "consumed (stale id)")
             finally:
@@ -1266,7 +1334,8 @@ class BackendEventHandler:
             canonical_status=canonical_status,
         )
         self._questions().finish_inline_for_tool_result(event.call_id)
-        self._live_diff.record_tool_result(event)
+        if self._live_diff.record_tool_result(event):
+            self._callbacks.refresh_diff_preview(False)
         s.refresh_git_branch()
         ui.show_status(STATUS_THINKING.bind())
         from chrys.app.tui.widgets.chat.tool_call import fmt_duration
@@ -1353,7 +1422,8 @@ class BackendEventHandler:
             provider_status=event.provider_status,
             canonical_status=canonical_status,
         )
-        self._live_diff.record_tool_result(event)
+        if self._live_diff.record_tool_result(event):
+            self._callbacks.refresh_diff_preview(False)
         s.refresh_git_branch()
 
     async def on_sub_agent_tool_args_updated(self, event: InvocationToolCallArgsUpdated) -> None:
@@ -1516,9 +1586,24 @@ class BackendEventHandler:
             ),
         )
 
+    async def on_steered(self, event: InvocationSteered) -> None:
+        """A steer gave up the running pass: its tool cards end as on Stop, and the turn goes on.
+
+        Never held by the render gate: tool cards are not, and text it holds
+        replays as the pass's text before the steer, as it streamed.
+        """
+        if event.origin.kind == "turn" and self.agent_running:
+            await self._ui().end_steered_pass()
+
     async def on_answer_withdrawn(self, event: InvocationAnswerWithdrawn) -> None:
-        """A bare Continue or Retry dropped this answer from history to ask for it again: it goes from view."""
+        """A Continue, Retry or steer dropped this answer from history: it goes from view."""
         if event.origin.kind == "turn":
+            # Text it names still waiting in the gate goes first; otherwise it applies at
+            # once, as the run that dropped the answer waits for it (behind a restore's replay too).
+            gate = self._state.render_gate
+            if gate.defers(event) and gate.holds_text_of(event.segment_ids):
+                gate.defer(event)
+                return
             await self._ui().withdraw_answer(event.segment_ids)
         elif _chat_sub_agent(event.origin):
             self._ui().sub_agent_answer_withdrawn(event.origin.invocation_id, event.segment_ids)
@@ -1882,6 +1967,15 @@ class BackendEventHandler:
             f"side_calls={event.side_call_tokens:,}/{event.side_call_token_budget:,}",
         )
 
+    def notify_held_error(self, event: Error) -> None:
+        """Show an error held back while a submit that opened no turn was in flight: a notice, never a failed turn.
+
+        It came from something else (the submit's own refusal is handled as it
+        arrives), and no turn ran, so the transcript and retry mode stay as they are.
+        """
+        message = event.message if event.display_message is None else self._render_display(event.display_message)
+        self.notify(message, title=_WARNING_TITLE.bind(), severity="warning", timeout=8)
+
     async def on_warning(self, event: Warning) -> None:
         s = self
         submit_rejected = event.code in _SUBMIT_BLOCKING_WARNING_CODES and s.in_pending_submit_publish
@@ -1894,7 +1988,7 @@ class BackendEventHandler:
                 self._show_image_rejection_dialog(event.code, display)
                 s.debug("ImageAttachmentBlocked", event.message.splitlines()[0][:80])
                 return
-            self._restore_pending_submit_text()
+            self._restore_inline_refusal_draft()
         key = _WarningDedupeKey(
             # Capability ownership is a model configuration fact. Its message
             # already includes the model profile, so /new must not reopen the
@@ -1925,10 +2019,25 @@ class BackendEventHandler:
             s.push_screen(dialog)
             s.debug("Warning", f"[{event.code}] {event.message[:80]}")
             return
-        s.notify(event.display_message or event.message, title=_WARNING_TITLE.bind(), severity="warning", timeout=8)
+        display = (
+            self._render_display_with_hint(event.display_message, event.display_hint)
+            if event.display_message is not None and event.display_hint is not None
+            else event.display_message or event.message
+        )
+        s.notify(display, title=_WARNING_TITLE.bind(), severity="warning", timeout=8)
         s.debug("Warning", f"[{event.code}] {event.message[:80]}")
 
     async def on_error(self, event: Error) -> None:
+        if event.code in {"manual_settings_reload_failed", "manual_settings_reload_denied"}:
+            self.notify(
+                self._render_display_with_hint(event.display_message, event.display_hint)
+                if event.display_message and event.display_hint
+                else event.display_message or event.message,
+                title=SETTINGS_TITLE.bind(),
+                severity="warning" if event.code == "manual_settings_reload_denied" else "error",
+                timeout=8,
+            )
+            return
         if self._callbacks.route_session_error(event):
             return
         s = self
@@ -1989,7 +2098,9 @@ class BackendEventHandler:
             s.push_screen(dialog)
             s.debug("Error", f"[{event.code}] {full_msg[:60]}")
             return
-        if s.in_pending_submit_publish and event.code in _SUBMIT_BLOCKING_ERROR_CODES:
+        if s.in_pending_submit_publish and (
+            event.code in _SUBMIT_BLOCKING_ERROR_CODES or event.code.startswith(_REBUILD_REFUSED_PREFIX)
+        ):
             # The backend refusing the submit in flight: the message, never a
             # run (see ``SubmitKind``).
             s.block_pending_user_submit()
@@ -2048,15 +2159,32 @@ class BackendEventHandler:
         s.debug("Error", f"[{event.code}] {full_msg[:60]}")
 
     def _restore_pending_submit_text(self) -> InputRestore | None:
-        """Restore the prompt text that the input widget cleared on submit."""
-        s = self
-        return self._ui().restore_input_text(s.pending_user_submit_text)
+        """Restore the draft the input widget cleared on submit, whole (fields, prompt-shortcut owner), once.
+
+        None when nothing was written: the composer holds the user's own draft,
+        or the submit's draft went back already.
+        """
+        draft = self._state.submit.take_draft_for(
+            lambda: (self._services.session_generation(), self._state.workspace.current_cwd)
+        )
+        if draft is None:
+            return None
+        return self._ui().restore_input_text(draft)
+
+    def _restore_inline_refusal_draft(self) -> None:
+        # A normal send returns the draft as it releases its claim, so Enter can send it again.
+        # Injection and retry only release the claim and rely on the handler to restore the draft.
+        if self._state.submit.kind != "turn":
+            self._restore_pending_submit_text()
 
     def _show_image_rejection_dialog(self, code: str, message: str) -> None:
         """Show the image rejection modal for a backend-validated prompt."""
-        text = self.pending_user_submit_text
-        converted_text = replace_image_mentions_with_paths(text, Path(self._state.workspace.current_cwd))
-        show_path_action = converted_text != text
+        # What comes back into the composer is the claimed draft (its labels, not
+        # the mentions they sent as), so the paths rewrite works on that draft.
+        claimed = self._state.submit.draft
+        draft = claimed if claimed is not None else ChatDraft(self.pending_user_submit_text)
+        converted = _with_image_paths(draft, Path(self._state.workspace.current_cwd))
+        show_path_action = converted != draft
         restore = self._restore_pending_submit_text()
 
         from chrys.app.tui.screens.dialogs.vision_unsupported import (
@@ -2078,7 +2206,7 @@ class BackendEventHandler:
             # Only the prompt this handler restored may be rewritten in place;
             # a draft the user typed instead is theirs, dialog or no dialog.
             if result == USE_IMAGE_PATHS_RESULT:
-                self._ui().rewrite_restored_input(restore, converted_text)
+                self._ui().rewrite_restored_input(restore, converted.text, references=converted.references)
 
         self.push_screen(dialog, callback=on_dismiss)
 
@@ -2091,7 +2219,9 @@ class BackendEventHandler:
         s = self
         ui = self._ui()
 
-        self._restore_pending_submit_text()
+        if code == _SHORTCUT_UNAVAILABLE_CODE:
+            self._state.submit.discard_shortcut_owner()
+        self._restore_inline_refusal_draft()
         short_msg = message
         if "- {" in short_msg:
             short_msg = short_msg[: short_msg.index("- {")].strip()
@@ -2143,5 +2273,26 @@ class BackendEventHandler:
             if event.display_message is None
             else self._render_display_with_hint(event.display_message, event.display_hint)
         )
-        await self._ui().show_retry_attempt(retry_msg, event.attempt, event.max_attempts, event.delay_seconds)
+        await self._ui().show_retry_attempt(
+            retry_msg, event.attempt, event.max_attempts, event.delay_seconds, wait_id=event.wait_id
+        )
         s.debug("Retry", f"{event.message} ({event.attempt}/{event.max_attempts})")
+
+
+def _with_image_paths(draft: ChatDraft, cwd: Path) -> ChatDraft:
+    """*draft* for a model without vision: every image it would send written as a plain path.
+
+    Image labels and image ``@file`` mentions in the draft's text, and image
+    mentions inside its folded pastes (which send as the user's own text),
+    become paths; quotes attach nothing anyway.
+    """
+    references = DraftReferences(
+        tuple(
+            replace(entry, content=replace_image_mentions_with_paths(entry.content, cwd))
+            if entry.kind == "paste"
+            else entry
+            for entry in draft.references.entries
+        )
+    )
+    text = replace_image_mentions_with_paths(image_labels_to_paths(draft.text, draft.references), cwd)
+    return replace(draft, text=text, references=references)

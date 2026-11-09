@@ -39,7 +39,7 @@ from chrys.app.tui.screens.agents.validation_messages import (
     ACP_FIELD_STRING,
     ACP_MODEL_ID_FIELD,
     ACP_NO_BUILTIN_TOOLS,
-    ACP_NO_CUSTOM_TOOLS,
+    ACP_NO_EXTENSIONS,
     ACP_NO_MCP,
     ACP_NO_NESTED_SUBAGENTS,
     ACP_RESULT_MODE,
@@ -357,6 +357,7 @@ def _acp_template_error(
     value: str,
     *,
     location: str,
+    allow_commands: bool = True,
     render_message: _RenderMessage = format_message,
 ) -> list[str]:
     """Report ``{{ENV}}`` templates real invocation could not resolve.
@@ -366,7 +367,7 @@ def _acp_template_error(
     guaranteed runtime failure — surface it at validation time instead.
     """
     try:
-        resolve_env_templates(value, location=location)
+        resolve_env_templates(value, location=location, allow_commands=allow_commands)
     except ValueError as exc:
         return [_context_message(render_message, prefix, str(exc))]
     return []
@@ -395,6 +396,7 @@ def validate_acp_draft(
                 prefix,
                 config.command,
                 location="ACP command",
+                allow_commands=False,
                 render_message=render_message,
             )
         )
@@ -482,7 +484,7 @@ def validate_acp_draft(
         # would pass a template that expands outside the workspace.
         expanded_cwd: str | None
         try:
-            expanded_cwd = resolve_env_templates(config.cwd, location="ACP working directory")
+            expanded_cwd = resolve_env_templates(config.cwd, location="ACP working directory", allow_commands=False)
         except ValueError as exc:
             errors.append(_context_message(render_message, prefix, str(exc)))
             expanded_cwd = None
@@ -565,8 +567,8 @@ def validate_acp_draft(
         errors.append(_context_error(render_message, prefix, ACP_NO_NESTED_SUBAGENTS.bind()))
     if profile.tools.mcp:
         errors.append(_context_error(render_message, prefix, ACP_NO_MCP.bind()))
-    if profile.tools.custom:
-        errors.append(_context_error(render_message, prefix, ACP_NO_CUSTOM_TOOLS.bind()))
+    if profile.extensions:
+        errors.append(_context_error(render_message, prefix, ACP_NO_EXTENSIONS.bind()))
     if profile.tools.builtins:
         errors.append(_context_error(render_message, prefix, ACP_NO_BUILTIN_TOOLS.bind()))
     return errors
@@ -857,7 +859,9 @@ def mcp_draft_errors_by_server(
                 errors.append(_prefixed_server_error(render_message, prefix, display, MCP_COMMAND_REQUIRED.bind()))
         else:
             errors.append(_prefixed_server_error(render_message, prefix, display, MCP_TRANSPORT.bind()))
-        if server.request_timeout is not None and server.request_timeout <= 0:
+        if server.request_timeout is not None and (
+            type(server.request_timeout) is not int or server.request_timeout <= 0
+        ):
             errors.append(_prefixed_server_error(render_message, prefix, display, MCP_TIMEOUT_POSITIVE.bind()))
         prefix_error = validate_mcp_tool_name_prefix(
             server.tool_name_prefix,

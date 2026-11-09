@@ -401,6 +401,27 @@ async def test_acp_panel_validates_expanded_cwd_template_like_real_invocation(
         assert panel.validate() == []
 
 
+@pytest.mark.parametrize("field", ["command", "cwd"])
+def test_acp_panel_test_refuses_commands_for_what_runs_and_where(tmp_path, field: str) -> None:
+    panel = AcpConfigPanel(AcpAgentConfig(command="agent"), workspace_cwd=str(tmp_path))
+    config = AcpAgentConfig(**{"command": "agent", field: "{{!tool --password hunter2}}"})
+
+    with pytest.raises(ValueError, match="not supported") as caught:
+        panel._test_spec(config, tmp_path / "stderr.log")
+
+    assert "hunter2" not in str(caught.value)
+
+
+def test_acp_panel_test_leaves_commands_in_arguments_and_environment_to_the_launch(tmp_path) -> None:
+    panel = AcpConfigPanel(AcpAgentConfig(command="agent"), workspace_cwd=str(tmp_path))
+    config = AcpAgentConfig(command="agent", args=["{{!tool get}}"], env={"TOKEN": "{{!tool get}}"})
+
+    spec = panel._test_spec(config, tmp_path / "stderr.log")
+
+    assert spec.args[0].startswith("chrys-cmd-")
+    assert spec.env["TOKEN"] == spec.args[0]
+
+
 def test_canonicalize_profile_matches_acp_panel_harvest_normalization() -> None:
     profile = AgentProfile(
         name="External",
@@ -440,9 +461,9 @@ async def test_agent_type_switch_sanitizes_hidden_sections_and_mounts_only_acp_t
         instructions="model instructions",
         tools=ToolsConfig(
             builtins=["read_file"],
-            custom=["custom_tool"],
             mcp=[MCPServerConfig(name="remote", transport="http", url="https://example.test")],
         ),
+        extensions=["acme_release"],
         skills=SkillsConfig(paths=["skills"]),
         sub_agents=SubAgentsConfig(agents=[SubAgentRef(profile="Explore")]),
         memory=MemoryConfig(files=["README.md"]),
@@ -497,6 +518,7 @@ async def test_agent_type_switch_sanitizes_hidden_sections_and_mounts_only_acp_t
         assert draft.profile.sub_agent_only is True
         assert draft.profile.instructions == ""
         assert draft.profile.tools == ToolsConfig()
+        assert draft.profile.extensions == []
         assert draft.profile.skills.paths == []
         assert draft.profile.skills.inline == []
         assert draft.profile.sub_agents == SubAgentsConfig()

@@ -1,112 +1,37 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for the ``env_bridge`` module — translating ``ModelProfile`` to env updates."""
+"""Model defaults, live profile selection, and proxy environment validation."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
+import httpx
 import pytest
 import yaml
 
 from chrys.foundation.config.runtime_pointer import get_model_pointer
 from chrys.foundation.config.spec import Source
+from chrys.service.llm.clients import _build_profile_http_client
 from chrys.service.profiles.models.env_bridge import (
     activate_model_profile,
     get_active_profile_id,
     get_global_default_profile_id,
     is_valid_no_proxy,
-    profile_to_activation_env_updates,
+    is_valid_proxy_url,
     sanitize_no_proxy_env,
+    sanitize_proxy_url_env,
     set_global_default_profile_id,
 )
 from chrys.service.profiles.models.schema import ModelProfile
 
 
 @pytest.fixture(autouse=True)
-def config_env_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("chrys.foundation.platform.get_platform", lambda: SimpleNamespace(config_dir=tmp_path))
-
-
-def test_openai_profile_with_key_and_base_url() -> None:
-    """OpenAI profile activation only emits the active profile pointer."""
-    p = ModelProfile(
-        id="oa-id",
-        name="OAI",
-        provider="openai",
-        api_key="sk-openai",
-        base_url="https://api.openai.example.com",
-    )
-    updates = profile_to_activation_env_updates(p)
-
-    assert updates == {"CHRYS_MODEL_PROFILE": "oa-id"}
-
-
-def test_anthropic_profile_with_key_and_base_url() -> None:
-    """Anthropic profile activation only emits the active profile pointer."""
-    p = ModelProfile(
-        id="an-id",
-        name="Anth",
-        provider="anthropic",
-        api_key="sk-anth",
-        base_url="https://api.anthropic.example.com",
-    )
-    updates = profile_to_activation_env_updates(p)
-
-    assert updates == {"CHRYS_MODEL_PROFILE": "an-id"}
-
-
-def test_deepseek_profile_with_key_and_base_url() -> None:
-    """DeepSeek profile activation only emits the active profile pointer."""
-    p = ModelProfile(
-        id="ds-id",
-        name="DS",
-        provider="deepseek-openai",
-        api_key="sk-ds",
-        base_url="https://api.deepseek.example.com",
-    )
-    updates = profile_to_activation_env_updates(p)
-
-    assert updates == {"CHRYS_MODEL_PROFILE": "ds-id"}
-
-
-def test_unknown_provider_only_emits_pointer() -> None:
-    """Unknown provider activation still only emits the profile pointer."""
-    p = ModelProfile(id="x", name="X", provider="unknown")
-    updates = profile_to_activation_env_updates(p)
-    assert updates == {"CHRYS_MODEL_PROFILE": "x"}
-
-
-def test_credentials_and_base_urls_are_not_env_updates() -> None:
-    """Profile secrets/URLs stay in YAML and are passed directly to the client factory."""
-    p = ModelProfile(id="x", name="X", provider="openai", api_key="k", base_url="https://api.example.com")
-    updates = profile_to_activation_env_updates(p)
-    assert set(updates) == {"CHRYS_MODEL_PROFILE"}
-
-
-def test_chrys_model_profile_always_present() -> None:
-    """CHRYS_MODEL_PROFILE is always in the output."""
-    p = ModelProfile(id="abc", name="Abc")
-    updates = profile_to_activation_env_updates(p)
-    assert updates["CHRYS_MODEL_PROFILE"] == "abc"
-
-
-def test_no_proxy_env_keys_are_not_profile_updates() -> None:
-    """Proxy bypass is now per-client config, not active-profile env output."""
-    p = ModelProfile(id="x", name="X", bypass_proxy=True)
-    updates = profile_to_activation_env_updates(p)
-    assert "NO_PROXY" not in updates
-    assert "no_proxy" not in updates
-
-
-def test_unknown_provider_still_emits_pointer_only() -> None:
-    """Unknown provider: only CHRYS_MODEL_PROFILE."""
-    p = ModelProfile(id="x", name="X", provider="azure", api_key="k", base_url="https://u")
-    updates = profile_to_activation_env_updates(p)
-    assert updates == {"CHRYS_MODEL_PROFILE": "x"}
 
 
 def test_get_active_profile_id_reads_chrys_model_profile(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,7 +62,7 @@ def _read_stored_pointer(config_dir: Path) -> object | None:
         return None
 
 
-def test_activate_model_profile_updates_only_pointer_and_live_process_without_dotenv_reload(
+def test_activate_model_profile_updates_only_pointer_and_live_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -147,11 +72,8 @@ def test_activate_model_profile_updates_only_pointer_and_live_process_without_do
     monkeypatch.setenv("CHRYS_MODEL_PROFILE", "old-id")
     monkeypatch.setenv("CHRYS_THEME", "process-theme")
 
-    with patch("dotenv.load_dotenv") as load_dotenv:
-        activate_model_profile("new-id")
-
-    assert load_dotenv.call_count == 0
-    # The dotenv is user-owned now; the durable pointer lives in the document.
+    activate_model_profile("new-id")
+    # The durable pointer lives in the settings document.
     assert path.read_text(encoding="utf-8") == env_original
     assert _read_stored_pointer(tmp_path) == "new-id"
     assert os.environ["CHRYS_MODEL_PROFILE"] == "new-id"
@@ -164,7 +86,7 @@ def test_activate_model_profile_leaves_the_dotenv_untouched(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Even a legacy pointer line is not activation's to rewrite — migration owns it."""
+    """Activation leaves legacy files untouched."""
     env_original = "OPENAI_API_KEY=user-owned\nCHRYS_MODEL_PROFILE=old-id\n"
     path = tmp_path / ".env"
     path.write_text(env_original, encoding="utf-8")
@@ -213,7 +135,7 @@ def test_get_global_default_profile_id_ignores_the_dotenv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A leftover dotenv pointer line feeds startup layers, not the stored default."""
+    """A leftover dotenv pointer line never supplies the stored default."""
     (tmp_path / ".env").write_text("CHRYS_MODEL_PROFILE=legacy-file-id\n", encoding="utf-8")
     monkeypatch.setenv("CHRYS_MODEL_PROFILE", "legacy-process-id")
 
@@ -309,3 +231,154 @@ def test_sanitize_no_proxy_env_scrubs_both_when_both_bad(monkeypatch: pytest.Mon
     assert scrubbed == {"NO_PROXY": "U\tBAD", "no_proxy": "l\tbad"}
     assert "NO_PROXY" not in os.environ
     assert "no_proxy" not in os.environ
+
+
+# ── Proxy address validation / scrub ────────────────────────────────
+
+_PROXY_URL_ENV_VARS = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+
+
+def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop every ``*_proxy`` variable: urllib reads any of them, in either casing."""
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+
+
+async def _constructs(build: Callable[[], httpx.Client | httpx.AsyncClient]) -> bool:
+    try:
+        client = build()
+    except httpx.InvalidURL, ValueError:
+        return False
+    if isinstance(client, httpx.Client):
+        client.close()
+    else:
+        await client.aclose()
+    return True
+
+
+def _profile(provider: str, *, bypass_proxy: bool) -> ModelProfile:
+    return ModelProfile(
+        id="p",
+        name="p",
+        provider=provider,
+        model_id="test-model",
+        api_key="sk-test",
+        base_url="https://provider.example",
+        bypass_proxy=bypass_proxy,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "socks://127.0.0.1:7897",
+        "socks://127.0.0.1:7897/",
+        "socks4://127.0.0.1:1080",
+        "socks4a://127.0.0.1:1080",
+        "ftp://127.0.0.1:21",
+        "http://[::1",
+        "127.0.0.1:abc",
+        " http://127.0.0.1:8080",
+        "http://127.0.0.1:8080",
+        "https://127.0.0.1:8443",
+        "socks5://127.0.0.1:1080",
+        "socks5h://127.0.0.1:1080",
+        "SOCKS5H://127.0.0.1:1080",
+        "127.0.0.1:7897",
+        "http://user:pass@127.0.0.1:8080",
+    ],
+)
+async def test_is_valid_proxy_url_matches_client_construction(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """The verdict is exactly whether every client that reads the environment can be built.
+
+    Covers plain httpx (HTTP MCP servers, the update check) and the model
+    client builder for both SDKs, with and without the profile's proxy
+    bypass, whose mounts come too late to save a proxy httpx can't build.
+    """
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("ALL_PROXY", value)
+    builders: dict[str, Callable[[], httpx.Client | httpx.AsyncClient]] = {
+        "httpx.Client": httpx.Client,
+        "httpx.AsyncClient": httpx.AsyncClient,
+        **{
+            f"{provider} bypass={bypass}": (
+                lambda provider=provider, bypass=bypass: _build_profile_http_client(
+                    _profile(provider, bypass_proxy=bypass), httpx.Timeout(5.0)
+                )
+            )
+            for provider in ("anthropic", "openai")
+            for bypass in (False, True)
+        },
+    }
+
+    verdict = is_valid_proxy_url(value)
+
+    assert {name: await _constructs(build) for name, build in builders.items()} == dict.fromkeys(builders, verdict)
+
+
+def test_is_valid_proxy_url_accepts_empty() -> None:
+    """urllib skips an empty value, so httpx never sees it."""
+    assert is_valid_proxy_url("") is True
+
+
+def test_sanitize_proxy_url_env_noop_when_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("ALL_PROXY", "")
+
+    assert sanitize_proxy_url_env() == {}
+    assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+    assert os.environ["ALL_PROXY"] == ""
+
+
+def test_sanitize_proxy_url_env_scrubs_only_the_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("ALL_PROXY", "socks://127.0.0.1:7897")
+
+    assert sanitize_proxy_url_env() == {"ALL_PROXY": "socks://127.0.0.1:7897"}
+    assert "ALL_PROXY" not in os.environ
+    assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+    assert httpx._utils.get_environment_proxies() == {"https://": "http://127.0.0.1:7897"}
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows env vars are case-insensitive: 'all_proxy' and 'ALL_PROXY' are the same key.",
+)
+def test_sanitize_proxy_url_env_checks_each_casing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """urllib prefers the lowercase name, so a bad lowercase value is the one httpx would read."""
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("all_proxy", "socks://127.0.0.1:7897")
+    monkeypatch.setenv("ALL_PROXY", "socks5h://127.0.0.1:7897")
+    monkeypatch.setenv("http_proxy", "socks4://127.0.0.1:1080")
+    monkeypatch.setenv("HTTP_PROXY", "socks://127.0.0.1:1080")
+
+    assert sanitize_proxy_url_env() == {
+        "HTTP_PROXY": "socks://127.0.0.1:1080",
+        "http_proxy": "socks4://127.0.0.1:1080",
+        "all_proxy": "socks://127.0.0.1:7897",
+    }
+    assert httpx._utils.get_environment_proxies() == {"all://": "socks5h://127.0.0.1:7897"}
+
+
+@pytest.mark.parametrize(
+    ("value", "shown"),
+    [
+        ("socks://alice:s3cret@proxy.example:1080", "socks://***@proxy.example:1080"),
+        ("socks4://s3cret@proxy.example:1080/", "socks4://***@proxy.example:1080/"),
+        ("socks://alice:pa/s3cret@proxy.example:1080", "socks://***@proxy.example:1080"),
+        ("socks://alice:p@s3cret@proxy.example:1080", "socks://***@proxy.example:1080"),
+        ("alice:s3cret@proxy.example:abc", "***@proxy.example:abc"),
+        ("alice:s3cret://part@proxy.example:8080", "***@proxy.example:8080"),
+        ("socks://proxy.example:1080", "socks://proxy.example:1080"),
+    ],
+)
+def test_sanitize_proxy_url_env_masks_credentials(monkeypatch: pytest.MonkeyPatch, value: str, shown: str) -> None:
+    """The returned value feeds a warning, so a password in the address never leaves the environment."""
+    _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("ALL_PROXY", value)
+
+    assert sanitize_proxy_url_env() == {"ALL_PROXY": shown}
+    assert "ALL_PROXY" not in os.environ

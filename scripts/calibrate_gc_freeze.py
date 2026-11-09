@@ -420,9 +420,9 @@ def _build_file_cache(count: int) -> tuple[ProjectPathScanResult, ProjectPathInd
 
 
 def _install_file_cache(screen: MainScreen, count: int) -> ProjectPathIndex:
-    scan, index = _build_file_cache(count)
-    root = screen._suggestions._current_file_root()
-    screen._suggestions._install_file_cache(root, scan, index)
+    _scan, index = _build_file_cache(count)
+    suggestions = screen._suggestions
+    suggestions._file_index_for(suggestions._current_file_root()).snapshot = index
     return index
 
 
@@ -1373,10 +1373,10 @@ async def calibrate(
             )
             whole_app_gate_passed = (
                 # Census of MainScreen.on_mount's registrations: chat panel,
-                # trajectory dashboard, session JSON panel, shell panel, and
+                # /btw panel, trajectory dashboard, session JSON panel, shell panel, and
                 # suggestions. A drifted count means a surface joined or left
                 # the freeze protocol without recalibration.
-                participant_count == 5
+                participant_count == 6
                 and watchdog_timer_active
                 and buddy_timer_active
                 and status_timer_active

@@ -60,6 +60,7 @@ def test_the_chat_display_preferences_sit_together_right_after_the_appearance_ro
         "ui.chat.show_thinking",
         "ui.chat.tool_groups_expanded",
         "ui.chat.fold_finished_turns",
+        "ui.chat.image_graphics",
     ]
     assert "ui.chat.tool_groups_expanded" not in {row.key for section in tools.sections for row in section.rows}
 
@@ -70,6 +71,7 @@ def test_tools_tab_lists_each_tool_category_as_its_own_section() -> None:
     assert tools is not None
     assert [(section.title.fallback, [row.key for row in section.rows]) for section in tools.sections] == [
         ("File search", ["tools.search.respect_gitignore"]),
+        ("Images", ["tools.image.send_limit_kb"]),
         (
             "Web search",
             [
@@ -131,7 +133,7 @@ def test_row_classes_follow_the_spec_kind_and_layout_variant() -> None:
         else:
             assert cls is InputRow
     assert classes["agent.default_profile"] is SelectRow
-    assert classes["model.role.buddy_model_id"] is SelectRow
+    assert classes["model.role.buddy"] is SelectRow
     assert classes["ui.theme"] is SelectRow
     assert classes["rollback.snapshots_keep"] is InputRow
     assert notification_keys <= {key for key, cls in classes.items() if cls is BoolRow}

@@ -74,6 +74,7 @@ If the combination is invalid, such as `auto` with a `providers` map but no `fal
 | `exa_mcp` | Exa's public endpoint, the same service `auto` uses by default |
 | `bing_html` | Bing search result pages |
 | `duckduckgo_html` | DuckDuckGo's HTML search result pages |
+| `keenable` | Keenable's public search API (keenable.ai) |
 
 These types accept only `type`: the endpoints are fixed and take no credentials. For example, to use DuckDuckGo instead of Exa:
 
@@ -89,6 +90,8 @@ tools:
 ```
 
 `bing_html` and `duckduckgo_html` read ordinary search result pages rather than an official API, so availability and result quality depend on the service and your network. Advertising and generated answers are left out. A captcha, consent page, or unfamiliar page layout is reported as an error, never as an empty result.
+
+`keenable` sends only the query and the number of results to `https://api.keenable.ai/v1/search/public`, with the header `X-Keenable-Title: iCode`. No API key or account is needed; the service has free rate limits per IP address.
 
 ### Search APIs with a key
 
@@ -114,7 +117,7 @@ tools:
         api_key_env: EXA_API_KEY
 ```
 
-iCode reads the key from the environment that started iCode or from your user `.env` file (macOS / Linux: `~/.chrys/.env`; Windows: `%APPDATA%\chrys\.env`). A variable set in the starting environment takes precedence, even when it is empty. A `.env` file in the working directory cannot provide web credentials. The user `.env` file is read each time the agent is built, so after changing it, save the agent again or restart iCode. Only the keys of the providers the agent actually uses are read.
+iCode reads the key from the environment that started iCode. Set it before starting iCode; after changing it, restart iCode. A missing or empty variable cannot provide a credential. User and working-directory `.env` files are not loaded. Only the keys of the providers the agent actually uses are read.
 
 ### Fall back to another provider
 
@@ -125,7 +128,7 @@ In `auto` mode, iCode tries the providers in `fallback_chain` in order and retur
 - The provider cannot be reached: its name cannot be resolved, it resolves to a private address, or the connection is refused in a way a retry cannot fix (for example, a certificate rejected by a proxy).
 - The request is too large for the provider, such as a long query that no longer fits in its URL.
 - The provider redirects, returns a captcha or consent page, or sends a response that is too large, uses an unsupported compression, or cannot be read.
-- `exa_mcp`, `bing_html`, or `duckduckgo_html` returns any HTTP 4xx error, or `exa_mcp` reports that the search failed (for example, its free rate limit was reached). An empty result from `exa_mcp` is an answer, so the chain stops there.
+- `exa_mcp`, `bing_html`, `duckduckgo_html`, or `keenable` returns any HTTP 4xx error, or `exa_mcp` reports that the search failed (for example, its free rate limit was reached). An empty result from `exa_mcp` is an answer, so the chain stops there.
 
 If you see `Error: exa_rate_limited`, Exa has reported that its anonymous search limit was reached. iCode does not immediately retry this error; it tries the next provider in your fallback chain, if any. When Exa is the last provider, including the default setup, the error suggests trying again later or configuring a [search API with a key](#search-apis-with-a-key).
 
@@ -332,7 +335,7 @@ See the [DeepSeek Responses API guide](https://api-docs.deepseek.com/guides/resp
 
 ## When web tools do not appear
 
-If iCode cannot set up an agent's web tools, for example because a key variable is missing or a custom endpoint is not granted, the agent still starts without them and iCode shows a warning that names the agent and the reason. Fix the configuration, then save the agent again or restart iCode.
+If iCode cannot set up an agent's web tools, for example because a key variable is missing or a custom endpoint is not granted, the agent still starts without them and iCode shows a warning that names the agent and the reason. If a key variable is missing or has changed, set it in the launch environment and restart iCode. For other configuration fixes, save the agent again or restart iCode.
 
 Also check that:
 

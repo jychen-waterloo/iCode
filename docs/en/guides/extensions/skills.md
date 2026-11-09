@@ -13,7 +13,7 @@ Choose an installation location based on where the skill should be available and
 | `<working-directory>/.agents/skills` | Make skills available only in the current working directory | Loaded only after you turn on “Load project skills”; can also be disabled per agent |
 | Custom directory | Load skills from a specific location | Must be added manually to the corresponding agent's configuration |
 
-Here, `<working-directory>` is the current working directory. Skills in a working directory come with the repository, so iCode does not load them until you turn on “Load project skills” under “Settings → Security → Project trust” (`project.skills_enabled`). When the working directory has skills that are not loaded, iCode shows a notice. When you switch working directories, iCode reloads the skills from the new working directory.
+Here, `<working-directory>` is the current working directory. Skills in a working directory come with the repository, so iCode does not load them until you turn on “Load project skills” under “Settings → Safety → Project trust” (`project.skills_enabled`). When the working directory has skills that are not loaded, iCode shows a notice. When you switch working directories, iCode reloads the skills from the new working directory.
 
 The two user-level skills directories have the following paths on each platform:
 
@@ -38,7 +38,7 @@ To check or adjust an agent's skill configuration:
 2. Confirm that the source corresponding to the skill's location is enabled:
 
    * "Load skills from user folder (if present)" corresponds to the Agent Skills shared directory.
-   * "Load skills from working folder (if present)" corresponds to `<working-directory>/.agents/skills`. It takes effect only while “Load project skills” is on in “Settings → Security → Project trust”.
+   * "Load skills from working folder (if present)" corresponds to `<working-directory>/.agents/skills`. It takes effect only while “Load project skills” is on in “Settings → Safety → Project trust”.
 
 3. If the skill is in another directory, click "+ Add" and enter the directory containing the skill:
 
@@ -169,7 +169,7 @@ iCode recognizes text files as skill resources only if they have one of these ex
 Text resources use the same automatic encoding detection as `SKILL.md`; UTF-8 is recommended. In addition:
 
 * Script extensions must be listed in the agent configuration's "Allowed Script Extensions".
-* iCode reads only files at the skill directory root and in its immediate subdirectories. For example, it discovers `guide.md` and `references/guide.md`, but ignores `references/api/guide.md`.
+* iCode reads files at the skill directory root and up to two levels of subdirectories. For example, it discovers `guide.md`, `references/guide.md`, and `references/api/guide.md`, but ignores `references/api/v1/guide.md`.
 * Within a skill directory, iCode skips files and directories accessed through symbolic links or Windows directory junctions. Both point to other locations on disk. To use their contents, place the actual files in the skill directory.
 
 Files that do not meet the extension, directory depth, or link rules do not appear in the skill's resource or script list. A missing, inaccessible, or undecodable resource fails when read. These issues do not prevent an otherwise valid `SKILL.md` from loading.

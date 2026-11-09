@@ -38,6 +38,7 @@ from chrys.app.features.buddy.lifecycle import on_successful_turn as on_buddy_su
 from chrys.app.parsing import SanitizingArgumentParser
 from chrys.app.tui.behaviors.insert_clipboard import INSERT_CLIPBOARD_BINDINGS, copy_with_insert, paste_with_insert
 from chrys.app.tui.binding_display import QUIT_BINDING, localized_binding
+from chrys.app.tui.graphics.detect import ask_terminal
 from chrys.app.tui.i18n import LocaleController, render_str
 from chrys.app.tui.notifications import NotificationService, NotificationSettings
 from chrys.app.tui.support.gc_freeze import (
@@ -63,13 +64,14 @@ from chrys.app.tui.theme import (
     TuiVariableDefaultsMixin,
     with_tui_css_variables,
 )
-from chrys.app.tui.theme_loader import load_user_themes, user_theme_warning
+from chrys.app.tui.theme_loader import UserThemeScan, load_user_themes, user_theme_warning
 from chrys.app.tui.theme_stylesheet import ThemeStylesheet
 from chrys.app.tui.toasts import TEXTUAL_TOAST_RACK_FORK_VERSION, refresh_newest_first
 from chrys.app.tui.util.debug_log import configure_debug_logging, stop_debug_logging
 from chrys.app.tui.widgets.chrome.status_bar import STATUS_AGENT_STARTUP_FAILED
 from chrys.foundation import platform as chrys_platform
 from chrys.foundation.branding import APP_DISPLAY_NAME, format_app_version_title
+from chrys.foundation.config.errors import ConfigError
 from chrys.foundation.config.runtime_pointer import set_model_pointer
 from chrys.foundation.config.settings import (
     DEFAULT_AGENT_PROFILE,
@@ -87,7 +89,7 @@ from chrys.foundation.models.session_surface import SessionSurface
 from chrys.foundation.platform.signals import HANGUP_SIGNALS
 from chrys.foundation.util.session_ids import session_short_id
 from chrys.orchestration.startup import catalog_load_warning
-from chrys.service.profiles.agents.registry import AgentProfileRegistry, resolve_profile_selector
+from chrys.service.profiles.agents.registry import AgentProfileRegistry, resolve_launch_profile
 from chrys.service.profiles.models.registry import ModelProfileRegistry
 from chrys.service.profiles.models.resolver import (
     format_available_profile_labels,
@@ -156,10 +158,13 @@ _TERMINAL_MODE_RESET = (
     "\x1b[=0;1u"  # Hard-reset Kitty keyboard flags
 )
 if TYPE_CHECKING:
+    from rich.console import RenderableType
     from textual.app import ComposeResult
     from textual.timer import Timer
 
     from chrys.app.features.session_title import SessionTitleUpdater
+    from chrys.app.tui.graphics.manager import TerminalGraphics
+    from chrys.app.tui.graphics.probe import TerminalReport
     from chrys.app.tui.screens.main import MainScreen
     from chrys.app.tui.themes.preview import ThemePreview
     from chrys.app.tui.widgets.loading import ChrysLoadingIndicator
@@ -168,37 +173,6 @@ if TYPE_CHECKING:
     from chrys.orchestration.engine.engine import AgentEngine
     from chrys.service.profiles.agents.schema import AgentProfile
     from chrys.service.state.store import JsonFileStateStore
-
-
-def _resolve_startup_profile(registry: AgentProfileRegistry, preferred_name: str) -> AgentProfile | None:
-    """Resolve the TUI launch profile, falling back through Code to the first visible profile."""
-    requested = preferred_name.strip() or DEFAULT_AGENT_PROFILE
-    # Match the TUI picker: hidden and sub-agent-only profiles are not valid main launch profiles.
-    profiles = registry.list_profiles()
-    by_name = {profile.name: profile for profile in profiles}
-
-    profile = resolve_profile_selector(profiles, requested)
-    if profile is not None:
-        return profile
-
-    if requested != DEFAULT_AGENT_PROFILE:
-        fallback = by_name.get(DEFAULT_AGENT_PROFILE)
-        if fallback is not None:
-            logger.warning(
-                "Default agent profile %r is not usable as a launch profile, falling back to %r.",
-                requested,
-                DEFAULT_AGENT_PROFILE,
-            )
-            return fallback
-
-    if profiles:
-        logger.warning(
-            "Default agent profile %r is not usable as a launch profile, falling back to %r.",
-            requested,
-            profiles[0].name,
-        )
-        return profiles[0]
-    return None
 
 
 def _apply_startup_active_model_selection(
@@ -218,7 +192,7 @@ def _apply_startup_active_model_selection(
             error_message = f"{error_message}. Available model profiles: {available}"
         parser.error(error_message)
     # Keep startup --model durable across SettingsReload without writing the
-    # user's .env. ModelConfigScreen may still replace this process-local value
+    # user's settings file. ModelConfigScreen may still replace this process-local value
     # later when the user intentionally applies a different active profile.
     set_model_pointer(profile.id, origin=SettingOrigin(layer=Source.CLI))
     return loaded_with_active_model_profile(loaded, profile, Source.CLI)
@@ -285,10 +259,13 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         gc_freeze_measure_counts: bool = False,
         update_check: UpdateCheck | None = None,
         show_startup_loading: bool = False,
+        terminal_report: TerminalReport | None = None,
     ) -> None:
         from chrys.service.state.store import JsonFileStateStore
 
         self._show_startup_loading = show_startup_loading
+        # What the terminal answered when asked before the app took its input; None when it was not asked.
+        self._terminal_report = terminal_report
         self._startup_loading_indicator: ChrysLoadingIndicator | None = None
         self._bus = event_bus
         self._engine = engine
@@ -351,6 +328,7 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         self._update_check = update_check
         self._update_check_task: asyncio.Task[None] | None = None
         self._left_behind_task: asyncio.Task[None] | None = None
+        self._terminal_graphics: TerminalGraphics | None = None
         self._main_screen: MainScreen | None = None
         self._gc_freeze_watchdog: Timer | None = None
         self._gc_pointer_buttons_down: set[int] = set()
@@ -565,6 +543,15 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
             return
         event.prevent_default()
         self.app_focus = False
+
+    def _display(self, screen: Screen, renderable: RenderableType | None) -> None:
+        """Have the row overlay draw images over a frame, inside Textual's own write of it.
+
+        Appending to the frame keeps Textual's synchronized update, cursor restore and Windows
+        chunking around the images; a frame Textual skips or fails to render draws none.
+        """
+        graphics = self._terminal_graphics
+        super()._display(screen, renderable if graphics is None else graphics.frame(renderable))
 
     def _load_screen_css(self, screen: Screen) -> None:
         """Load native secondary-screen CSS without restyling the underlay.
@@ -788,6 +775,75 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         self.unregister_theme(name)
         self._user_theme_names.discard(name)
 
+    def themes_after(self, scan: UserThemeScan) -> tuple[str, ...]:
+        """The theme names :meth:`follow_user_themes` would leave registered."""
+        gone = scan.absent_from(self._user_theme_names)
+        names = {name for name in self.available_themes if name not in gone}
+        return tuple(names.union(theme.name for theme in scan.themes))
+
+    def follow_user_themes(self, scan: UserThemeScan) -> None:
+        """Put the theme files and the settings' theme on screen, recording no choice.
+
+        A style pass reaches the whole transcript, so it runs only when what is
+        on screen changes, and once: a new or edited theme that is not showing
+        costs none, and one whose variables the styles reject is never shown
+        (recovering from it would be a second pass, on every reload after).
+        Nothing is written, even when the settings name a theme that no longer
+        exists: that costs this session's colours, not the setting. A preview
+        owns ``theme`` until it closes; the picker and the editor stay shut
+        during a reload, so none should be open here.
+        """
+        if self.theme_preview is not None or self._theme_selection_depth:
+            return
+        active = self.theme
+        edited = {theme.name: theme for theme in scan.themes if self.get_theme(theme.name) != theme}
+        gone = scan.absent_from(self._user_theme_names)
+        registered = (set(self.available_themes) - gone) | set(edited)
+        target = DEFAULT_THEME
+        for name in (self._settings.theme, active):
+            if name not in registered:
+                continue
+            if name == active and name not in edited:
+                target = name
+                break
+            theme = edited.get(name) or self.get_theme(name)
+            if theme is not None and self._parses_with(self.stylesheet, self._css_variables_of(theme)):
+                target = name
+                break
+            edited.pop(name, None)
+            reason = f"Theme {name!r} has invalid CSS; it was not applied"
+            self.call_next(self._bus.publish, user_theme_warning(name, reason))
+        for theme in edited.values():
+            self.register_user_theme(theme)
+        self.suspend_theme_choice()
+        try:
+            if target != active:
+                self.theme = target
+            elif target in edited:
+                self._watch_theme(active)
+                self._gc_freeze.request_reclaim(reason=GcReclaimReason.THEME_UPDATED, prompt=False)
+        finally:
+            self.resume_theme_choice()
+        for name in gone:
+            self.unregister_theme(name)
+            self._user_theme_names.discard(name)
+
+    def _css_variables_of(self, theme: Theme) -> dict[str, str]:
+        return with_tui_css_variables(
+            theme, {**self.get_theme_variable_defaults(), **theme.to_color_system().generate(), **theme.variables}
+        )
+
+    @staticmethod
+    def _parses_with(stylesheet: Stylesheet, variables: dict[str, str]) -> bool:
+        """Whether these same styles work with *variables*, leaving the live sheet alone."""
+        probe = Stylesheet(variables=variables)
+        probe.source = stylesheet.source.copy()
+        try:
+            probe.parse()
+        except StylesheetError, TokenError:
+            return False
+        return True
+
     def _watch_theme(self, theme_name: str) -> None:
         """Apply the selected theme and persist confirmed choices."""
         if self.theme_preview is not None:
@@ -822,15 +878,8 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         name = self.theme
         if name not in self._user_theme_names:
             return False
-        fallback = with_tui_css_variables(
-            CHRYS_THEME,
-            {**self.get_theme_variable_defaults(), **CHRYS_THEME.to_color_system().generate(), **CHRYS_THEME.variables},
-        )
-        probe = Stylesheet(variables=fallback)
-        probe.source = stylesheet.source.copy()
-        try:
-            probe.parse()
-        except StylesheetError, TokenError:
+        fallback = self._css_variables_of(CHRYS_THEME)
+        if not self._parses_with(stylesheet, fallback):
             # An application CSS error must still surface as an application error.
             return False
         stylesheet.set_variables(fallback)
@@ -853,8 +902,16 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         """Persist a theme choice and overlay it on the shared handle, as a pair."""
         if self.theme_preview is not None or self._theme_selection_depth:
             return
-        persist_theme(theme_name)
         self._settings_handle.override(theme=theme_name)
+        failure = persist_theme(theme_name)
+        if failure is None:
+            self._settings_handle.confirm_written({"ui.theme": theme_name})
+        else:
+            self.notify(
+                render_str(self.localizer, failure.display) if isinstance(failure, ConfigError) else str(failure),
+                severity="error",
+                markup=False,
+            )
 
     def apply_theme_setting(self, theme_name: str) -> bool:
         """Apply and persist an explicit theme choice, including an unchanged fallback.
@@ -1020,6 +1077,12 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
 
     async def _prepare_main_screen(self) -> tuple[MainScreen, AgentProfile | None]:
         """Mount the main screen and prepare its subscriptions and loading state."""
+        # Here, not at mount: the main screen's import has brought in the image code by now.
+        from chrys.app.tui.graphics.manager import start_terminal_graphics
+
+        self._terminal_graphics = start_terminal_graphics(
+            self, enabled=self._settings.chat_image_graphics, report=self._terminal_report
+        )
         screen = self._build_main_screen()
         await self.push_screen(screen)
         self._main_screen = screen
@@ -1043,7 +1106,7 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         if not registry.list_profiles():
             registry.load_all()
 
-        profile = _resolve_startup_profile(registry, self._profile_name)
+        profile = resolve_launch_profile(registry, self._profile_name)
 
         if profile is not None:
             screen.set_startup_agent_loading(True)
@@ -1227,12 +1290,24 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
                 markup=False,
             )
 
+    def on_exit_app(self) -> None:
+        """Free the terminal's images while the app's screen is still the terminal's.
+
+        Textual leaves the alternate screen before Unmount, and kitty and Ghostty keep each screen's
+        images apart: deleted any later, they would stay in the terminal's memory.
+        """
+        if self._terminal_graphics is not None:
+            self._terminal_graphics.stop()
+
     async def on_unmount(self) -> None:
         """Shutdown engine on exit."""
         # While the terminal can still be written (Unmount precedes the
         # driver close), settle the OSC 7501 record on idle and stop
         # reporting; the engine shutdown below then cannot overwrite it.
         await self._program_status_reporter.close()
+        if self._terminal_graphics is not None:
+            # Its images were freed when the app exited or crashed; this also ends the payload job.
+            await self._terminal_graphics.close()
         self._gc_freeze.close()
         if self._gc_freeze_watchdog is not None:
             self._gc_freeze_watchdog.stop()
@@ -1276,6 +1351,10 @@ class ChrysApp(TuiVariableDefaultsMixin, App):
         # File logging must NEVER break the crash-handling path.
         with contextlib.suppress(Exception):
             self._write_crash_log(error)
+        if self._terminal_graphics is not None:
+            # The app ends without handling ExitApp: free the terminal's images as ``on_exit_app`` does.
+            with contextlib.suppress(Exception):
+                self._terminal_graphics.stop()
         super()._handle_exception(error)
 
     def _write_crash_log(self, error: Exception) -> None:
@@ -1412,7 +1491,7 @@ def main(app_cls: type[ChrysApp] = ChrysApp) -> None:
 
         install_log_handler()
 
-        bootstrap = bootstrap_runtime(dotenv_override=True, project_root=Path(os.getcwd()))
+        bootstrap = bootstrap_runtime(project_root=Path(os.getcwd()))
 
         bus = EventBus()
         registry = AgentProfileRegistry()
@@ -1439,6 +1518,8 @@ def main(app_cls: type[ChrysApp] = ChrysApp) -> None:
             record_hook_runs=True,
         )
 
+        # Last before the app runs: Textual would type the terminal's replies into the prompt as keys.
+        terminal_report = ask_terminal(os.environ, enabled=loaded.settings.chat_image_graphics)
         app = app_cls(
             bus,
             engine,
@@ -1454,6 +1535,7 @@ def main(app_cls: type[ChrysApp] = ChrysApp) -> None:
             session_title_updater=session_title_updater,
             update_check=for_this_copy(enabled=loaded.settings.update_check, served=running_under_textual_web_driver()),
             show_startup_loading=True,
+            terminal_report=terminal_report,
         )
         try:
             # On Windows, the ProactorEventLoop shutdown can raise KeyboardInterrupt

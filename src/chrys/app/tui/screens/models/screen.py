@@ -32,12 +32,14 @@ from chrys.app.tui.util.static_update import update_static_in_place
 from chrys.app.tui.widgets import Checkbox, ConfigAddButton, Select
 from chrys.app.tui.widgets import EnhancedInput as Input
 from chrys.foundation.branding import APP_DISPLAY_NAME
+from chrys.foundation.config.errors import ConfigError
 from chrys.foundation.config.runtime_pointer import set_model_pointer
 from chrys.foundation.config.spec import SettingOrigin, Source
 from chrys.foundation.i18n import DisplayBlock, MessageDef, MessageRef, msg
 from chrys.foundation.i18n.formatting import format_message
 from chrys.foundation.text.reading_order import reading_order
 from chrys.foundation.util.chrys_headers import is_chrys_managed_header_name
+from chrys.foundation.util.env_templates import blank_commands
 from chrys.foundation.util.header_charset import (
     api_key_charset_error,
     header_name_charset_error,
@@ -699,7 +701,7 @@ def _validate_chat_option_extra_headers(
             ]
         for charset_error in (
             header_name_charset_error(str(header)),
-            header_value_charset_error(str(header), value),
+            header_value_charset_error(str(header), blank_commands(value)),
         ):
             if charset_error:
                 return [
@@ -732,9 +734,10 @@ class ModelConfigScreen(BaseDialog[str]):
     is running: profile navigation stays available, but mutating controls
     are hidden/disabled and Close/Escape always dismisses with ``""``.
 
-    Dismisses with ``"switched"`` when deleting the runtime-effective
-    profile requires a backend reload, ``"updated"`` after a Save, or
-    ``""`` on Close / Escape when the runtime can remain unchanged.
+    Dismisses with ``"deleted"`` when a profile was deleted (a backend
+    reload drops whatever the session used that is gone — the process
+    pointer's, the session's own, an agent's), ``"updated"`` after a Save,
+    or ``""`` on Close / Escape when the runtime can remain unchanged.
     """
 
     CSS_PATH = "screen.tcss"
@@ -1159,7 +1162,7 @@ class ModelConfigScreen(BaseDialog[str]):
                     )
                     for charset_error in (
                         header_name_charset_error(key),
-                        header_value_charset_error(key, value),
+                        header_value_charset_error(key, blank_commands(value)),
                     )
                     if charset_error
                 )
@@ -1580,7 +1583,7 @@ class ModelConfigScreen(BaseDialog[str]):
                 await self._do_delete(profile_id)
             except Exception as exc:
                 self.notify(
-                    str(exc),
+                    self._render_toast(exc.display) if isinstance(exc, ConfigError) else str(exc),
                     title=self._render_toast(_MODEL_SETTINGS_TITLE.bind()),
                     severity="error",
                     timeout=5,
@@ -1593,11 +1596,12 @@ class ModelConfigScreen(BaseDialog[str]):
         """Actually delete the profile after confirmation.
 
         Deleting the global default promotes, in the user settings document,
-        the first remaining profile as the sidebar lists them. Deleting the runtime-effective profile also
-        resynchronizes the process pointer to a selectable profile — the
-        file default when it resolves, else the first selectable one —
-        and requests a backend reload. If no profiles remain, a fresh
-        editable profile is created before either pointer is reconciled.
+        the first remaining profile as the sidebar lists them. Deleting the process pointer's profile also
+        resynchronizes the pointer to a selectable profile — the file
+        default when it resolves, else the first selectable one. Any
+        deletion requests a backend reload, which drops whatever the session
+        used that is gone. If no profiles remain, a fresh editable profile
+        is created before either pointer is reconciled.
         """
         if self._read_only:
             return
@@ -1631,8 +1635,17 @@ class ModelConfigScreen(BaseDialog[str]):
                 (candidate for candidate in profiles if is_model_profile_selectable(candidate)),
                 profiles[0],
             )
-            await self._persist_active_profile(new_global_default)
-            self._global_default_profile_id = new_global_default.id
+            try:
+                await self._persist_active_profile(new_global_default)
+            except (OSError, ValueError) as exc:
+                self.notify(
+                    self._render_toast(exc.display) if isinstance(exc, ConfigError) else str(exc),
+                    title=self._render_toast(_SAVE_ERROR_TITLE.bind()),
+                    severity="error",
+                    markup=False,
+                )
+            else:
+                self._global_default_profile_id = new_global_default.id
 
         if was_runtime_effective:
             # The file default may itself be dangling or hollow (deleting a
@@ -1651,7 +1664,9 @@ class ModelConfigScreen(BaseDialog[str]):
                 set_model_pointer(replacement.id, origin=SettingOrigin(layer=Source.PROCESS_RUNTIME))
             else:
                 set_model_pointer(None, origin=SettingOrigin(layer=Source.PROCESS_RUNTIME))
-            self._requires_runtime_reload = True
+        # Whichever of the session's models it was — the pointer's, the session's own, an
+        # agent's — the reload finds out; telling them apart here would be a second definition.
+        self._requires_runtime_reload = True
 
         if seeded_default:
             return
@@ -1700,7 +1715,7 @@ class ModelConfigScreen(BaseDialog[str]):
             profile = await self._save_only()
         except Exception as exc:
             self.notify(
-                str(exc),
+                self._render_toast(exc.display) if isinstance(exc, ConfigError) else str(exc),
                 title=self._render_toast(_SAVE_ERROR_TITLE.bind()),
                 severity="error",
                 timeout=5,
@@ -1779,17 +1794,16 @@ class ModelConfigScreen(BaseDialog[str]):
     def _cancel_result(self) -> str:
         """Return the dismiss result from explicit reload requirements.
 
-        * ``"switched"`` — deleting the runtime-effective profile set
-          the reload latch after reconciling the process pointer.
+        * ``"deleted"`` — a profile was deleted (after reconciling the
+          process pointer): the reload drops whatever is gone.
         * ``"updated"`` — at least one Save reached disk + registry;
           the engine must rebuild so profile edits take effect.
-        * ``""`` — no runtime reload is required; a global-default-only
-          deletion applies to future processes.
+        * ``""`` — no runtime reload is required.
         """
         if self._read_only:
             return ""
         if self._requires_runtime_reload:
-            return "switched"
+            return "deleted"
         if self._saved_anything:
             return "updated"
         return ""
@@ -1867,7 +1881,7 @@ class ModelConfigScreen(BaseDialog[str]):
         # pass untouched; their resolved values are re-checked when the
         # client is built.
         api_key = self.query_one("#mc-api-key", Input).value.strip()
-        api_key_error = api_key_charset_error(api_key)
+        api_key_error = api_key_charset_error(blank_commands(api_key))
         if api_key_error:
             errors.append(api_key_error)
 

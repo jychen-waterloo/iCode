@@ -27,6 +27,7 @@ from chrys.foundation.events.types import (
     InvocationToolCallArgsUpdated,
 )
 from chrys.foundation.models.invocations import InvocationOrigin
+from chrys.foundation.tool_approval import declare_requires_approval
 from chrys.foundation.tool_kinds import KIND_CONTEXT, KIND_SKILL, KIND_SUB_AGENT
 from chrys.foundation.trajectory.context import trajectory_scope
 from chrys.foundation.trajectory.event_types import EventType
@@ -488,11 +489,13 @@ async def test_re_dispatched_hooks_target_the_tool_operation_they_can_still_bloc
             _event: HookEvent,
             _payload: dict[str, Any],
             *,
+            scope: str = "turn",
             target_operation_id: str | None = None,
             trajectory_context: object | None = None,
             origin: InvocationOrigin | None = None,
             operation: HookOperation | None = None,
         ) -> HookDecision:
+            assert scope == "turn"
             self.targets.append(target_operation_id)
             return HookDecision()
 
@@ -1019,6 +1022,8 @@ async def test_run_skill_script_floor_rejects_before_tool_process_can_start() ->
     await bus.subscribe(ApprovalRequest, _respond)
 
     ctx = _ctx("run_skill_script", KIND_SKILL, {"skill_name": "example", "script_path": "scripts/run.py"})
+    # The floor is the called tool's own declaration, read from the live context.
+    declare_requires_approval(ctx.function)
     await h.run(mw, ctx)
 
     assert not h.called  # the tool process never started

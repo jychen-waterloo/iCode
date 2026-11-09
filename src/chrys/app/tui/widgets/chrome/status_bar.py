@@ -24,6 +24,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from chrys.app.tui.i18n import render_str
+from chrys.app.tui.util.stream_tokens import StreamTokens
 from chrys.app.tui.util.visibility import (
     resync_compositor_regions,
     set_widget_visibility_without_layout,
@@ -83,6 +84,7 @@ STATUS_ELAPSED_DAYS_HOURS_MINUTES_SECONDS = msg(
     "tui.status.elapsed_days_hours_minutes_seconds",
     fallback="{days}d {hours}h {minutes}m {seconds}s",
 )
+STATUS_OUTPUT_SPEED = msg("tui.status.output_speed", fallback="{speed} tok/s")
 STATUS_DETAILS_TOOLTIP = msg("tui.status.details_tooltip", fallback="Click for details")
 STATUS_AGENT_SELECTOR_LABEL = msg("tui.status.agent_selector_label", fallback="Agent")
 STATUS_MODEL_SELECTOR_LABEL = msg("tui.status.model_selector_label", fallback="Model")
@@ -364,6 +366,7 @@ class StatusBar(Widget):
         self._locale_controller = locale_controller
         self._start_time: float = 0.0
         self._tool_count: int = 0
+        self._output_tokens = StreamTokens()
         self._flash: _FlashState | None = None
         self._timer: Timer | None = None
         self._status_shown_at = 0.0
@@ -623,7 +626,15 @@ class StatusBar(Widget):
         """Start timing a new agent.run cycle."""
         self._start_time = time.monotonic()
         self._tool_count = 0
+        self._output_tokens = StreamTokens()
         self._refresh_running_trail()
+
+    def note_output_text(self, text: str) -> None:
+        """Count streamed model text toward the speed; only the trail's own refresh shows it, so a delta paints nothing."""
+        self._output_tokens.note(text, time.monotonic())
+
+    def _output_speed(self) -> int | None:
+        return self._output_tokens.speed(time.monotonic())
 
     def show(self, status: StatusMessage) -> None:
         """Show the status bar with given status text.
@@ -948,6 +959,9 @@ class StatusBar(Widget):
             stats.append(self._format_elapsed())
         if self._tool_count:
             stats.append(self._render_message(STATUS_TOOL_CALLS.bind(count=self._tool_count)))
+        speed = self._output_speed()
+        if speed is not None:
+            stats.append(self._render_message(STATUS_OUTPUT_SPEED.bind(speed=speed)))
         text = f"  ({' \u00b7 '.join(stats)})" if stats else ""
         self.query_one("#status-trail", Static).update(Text(text), layout=False)
         # Tool info on the right

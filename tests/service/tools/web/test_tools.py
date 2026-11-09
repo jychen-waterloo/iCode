@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from chrys.foundation.config.settings import Settings
+from chrys.foundation.tool_approval import declares_requires_approval
 from chrys.foundation.tool_kinds import get_tool_kind
 from chrys.foundation.tool_result_metadata import WEB_FETCH_FINAL_URL_METADATA_KEY
 from chrys.service.agent_middleware.events.result_persistence import persistable_result_metadata
@@ -30,9 +31,8 @@ from chrys.service.tools.builtins.web.credentials import ResolvedSearchCredentia
 from chrys.service.tools.builtins.web.fetch.tool import WebFetchTools
 from chrys.service.tools.builtins.web.http import DestinationPolicy, WebEgressRuntime
 from chrys.service.tools.builtins.web.search.tool import WebSearchTools
-from chrys.service.tools.registry import ToolRegistry
 from chrys.service.tools.result_metadata import tool_result_metadata
-from tests.service.tools.web._support import Chunks, assemble
+from tests.service.tools.web._support import Chunks, assemble_agent_tools
 from tests.support.waiting import wait_for
 
 
@@ -188,6 +188,39 @@ async def test_domain_filters_pushed_to_providers_without_native_support(provide
     sent_query = str(seen[0].url.params["q"])
     assert sent_query.startswith("query")
     assert "site:example.com" in sent_query
+
+
+async def test_keenable_keyless_contract_and_filter():
+    seen = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        items = [
+            {"title": "Keep", "url": "https://example.com/a", "description": "", "snippet": "page text"},
+            {"title": "Drop", "url": "https://other.example.org/b", "description": "", "snippet": "page text"},
+        ]
+        return response(200, json.dumps({"results": items}))
+
+    runtime = WebEgressRuntime()
+    provider = create_provider("free", parse_provider({"type": "keenable"}), ResolvedSearchCredentials({}))
+    tools = WebSearchTools((provider,), runtime, DestinationPolicy(), num_results=3)
+    with patch.object(
+        runtime,
+        "client",
+        autospec=True,
+        side_effect=lambda policy, *, timeout: httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    ):
+        result = await tools.web_search('中 "query"', allowed_domains=["example.com"])
+    data = json.loads(result.split("\nExternal", 1)[0])
+    assert data["provider"] == "free"
+    assert data["filtered_results"] == 1
+    assert data["results"] == [{"title": "Keep", "url": "https://example.com/a", "snippet": "page text"}]
+    request = seen[0]
+    assert request.method == "POST"
+    assert str(request.url) == "https://api.keenable.ai/v1/search/public"
+    assert request.headers["X-Keenable-Title"] == "iCode"
+    assert {"authorization", "x-api-key"}.isdisjoint(key.lower() for key in request.headers)
+    assert json.loads(request.content) == {"query": '中 "query" site:example.com', "max_results": 3}
 
 
 async def test_custom_mapping_and_authorization_before_credentials():
@@ -475,7 +508,7 @@ async def test_fetch_cross_site_redirect_no_second_request():
     assert metadata["web_fetch_redirect_to"] == "http://127.0.0.1/admin"
 
 
-def test_profile_round_trip_and_registry_gate(tmp_path):
+async def test_profile_round_trip_and_registry_gate(tmp_path):
     import yaml
 
     path = tmp_path / "profile.yaml"
@@ -488,17 +521,10 @@ def test_profile_round_trip_and_registry_gate(tmp_path):
     assert serialized["tools"]["web_search"]["fallback_chain"] == []
     path.write_text(yaml.safe_dump(serialized), encoding="utf-8")
     assert load_profile_from_yaml(path) == profile
-    registry = ToolRegistry()
-    tools = registry.load_builtins(
-        profile.tools.builtins,
-        settings=Settings(),
-        web=assemble(profile.tools.builtins, profile.tools.web_search, profile.tools.web_fetch),
-    )
+    assembled = await assemble_agent_tools(profile.tools.builtins, profile.tools.web_search, profile.tools.web_fetch)
+    tools = assembled.tools
     assert [tool.name for tool in tools] == ["web_fetch", "sleep"]
     assert tools[0].kind is None and get_tool_kind(tools[0]) == "web_fetch"
-    unwired = ToolRegistry()
-    unwired.load_builtins(["web_fetch"])
-    assert unwired.get_by_category("web_fetch") == []
 
 
 @pytest.mark.parametrize(
@@ -524,8 +550,19 @@ def test_profile_null_web_section_means_absent(tmp_path):
 
 def test_approval_kinds_are_independent():
     policy = ApprovalPolicy(ApprovalConfig(default="skip", overrides={"search": "skip", "web_search": "skip"}))
-    assert not policy.should_require_approval("web_search", "web_search")
-    assert policy.should_require_approval("web_fetch", "web_fetch")
+    assert not policy.should_require_approval("web_search", "web_search", tool_requires_approval=True)
+    assert policy.should_require_approval("web_fetch", "web_fetch", tool_requires_approval=True)
+
+
+async def test_local_web_tools_ask_before_they_run_unless_the_profile_says_otherwise():
+    """Both local web tools reach the network, so they declare the approval floor themselves."""
+    tools = (await assemble_agent_tools(["web_search", "web_fetch"])).tools
+    declared = {tool.name: declares_requires_approval(tool) for tool in tools}
+    assert declared == {"web_search": True, "web_fetch": True, "sleep": False}
+    policy = ApprovalPolicy(ApprovalConfig(default="auto", overrides={}), tools=tools)
+    assert policy.should_require_approval("web_search")
+    assert policy.should_require_approval("web_fetch")
+    assert not policy.should_require_approval("sleep")
 
 
 def test_fetch_profile_limit_reaches_build_and_shared_gate():

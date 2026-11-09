@@ -33,7 +33,7 @@ from chrys.app.tui.util.git_branch import GitBranchMonitor
 from chrys.app.tui.widgets.chat.messages import AgentMessage, UserMessage
 from chrys.app.tui.widgets.chat.panel import ChatPanel
 from chrys.app.tui.widgets.chrome.footer import ChrysFooter
-from chrys.app.tui.widgets.chrome.input_bar import InputBar, InputDraftSnapshot
+from chrys.app.tui.widgets.chrome.input_bar import ChatDraft, InputBar, InputDraftSnapshot
 from chrys.app.tui.widgets.editor import (
     MESSAGE_EDITOR_CHARACTER_LIMIT_STATUS,
     MESSAGE_EDITOR_MAX_CHARACTERS,
@@ -103,6 +103,11 @@ def _hint_text(dialog: EditorDialog) -> str:
 
 def _status_text(dialog: EditorDialog) -> str:
     return str(dialog.query_one("#editor-status", Static).render())
+
+
+def _outcome(result: EditorDialogResult) -> tuple[bool, str, EditorMode]:
+    """Whether *result* was accepted, the draft text it returned and its keymap."""
+    return result.accepted, result.text, result.mode
 
 
 async def _wait_for_condition(
@@ -427,13 +432,7 @@ async def test_keyboard_save_returns_edited_text_without_submitting(save_key: st
         await pilot.press(save_key)
         await pilot.pause()
 
-        assert results == [
-            EditorDialogResult(
-                accepted=True,
-                text="draft\nmore",
-                mode=EditorMode.STANDARD,
-            )
-        ]
+        assert [_outcome(result) for result in results] == [(True, "draft\nmore", EditorMode.STANDARD)]
 
 
 async def test_save_is_immediate_and_discard_requires_confirmation() -> None:
@@ -485,7 +484,7 @@ async def test_discard_confirms_unchanged_nonempty_text(text: str, mode: EditorM
 
         await click_when_settled(pilot, "#confirm-yes")
         await wait_for(lambda: bool(results), pilot=pilot, description="confirmed editor discard")
-        assert results == [EditorDialogResult(accepted=False, text=text, mode=mode)]
+        assert [_outcome(result) for result in results] == [(False, text, mode)]
 
 
 @pytest.mark.parametrize("cancel_action", ["button", "escape", "backdrop"])
@@ -524,7 +523,7 @@ async def test_cancel_discard_preserves_editor_text_cursor_and_undo(cancel_actio
         assert editor.text == "draft"
         await pilot.press("ctrl+o")
         await wait_for(lambda: bool(results), pilot=pilot, description="commit after cancelling discard")
-        assert results == [EditorDialogResult(accepted=True, text="draft", mode=EditorMode.STANDARD)]
+        assert [_outcome(result) for result in results] == [(True, "draft", EditorMode.STANDARD)]
 
 
 @pytest.mark.parametrize("initial_text", ["", "draft"])
@@ -540,7 +539,7 @@ async def test_discard_empty_editor_closes_without_confirmation(initial_text: st
         await click_when_settled(pilot, "#editor-cancel")
         await wait_for(lambda: bool(results), pilot=pilot, description="empty editor discarded")
         assert not any(isinstance(screen, ConfirmDialog) for screen in app.screen_stack)
-        assert results == [EditorDialogResult(accepted=False, text="", mode=EditorMode.STANDARD)]
+        assert [_outcome(result) for result in results] == [(False, "", EditorMode.STANDARD)]
 
 
 async def test_discard_confirmation_uses_and_refreshes_app_locale() -> None:
@@ -1129,7 +1128,8 @@ async def test_main_screen_editor_cancel_and_writeback_preserve_drafts_without_s
         await pilot.press("X", "ctrl+o")
         await wait_for(lambda: app.screen is app.main_screen and text_area.has_focus, pilot=pilot)
         assert input_bar.value == "orXiginal"
-        assert text_area.cursor_location == (0, 9)
+        # The input box goes on where the editor left the cursor.
+        assert text_area.cursor_location == (0, 3)
         assert app.submitted == []
 
         for replacement in ("", "new draft"):
@@ -1261,7 +1261,7 @@ async def test_main_screen_rejects_oversize_draft_before_opening_editor(monkeypa
         monkeypatch.setattr(
             input_bar,
             "snapshot_draft",
-            lambda: InputDraftSnapshot("x" * (MESSAGE_EDITOR_MAX_CHARACTERS + 1), (0, 0), 0),
+            lambda: InputDraftSnapshot(ChatDraft("x" * (MESSAGE_EDITOR_MAX_CHARACTERS + 1)), (0, 0), 0),
         )
         input_bar.focus_input()
         await wait_for(
@@ -1620,6 +1620,16 @@ async def test_populated_main_screen_editor_overlay_does_not_restyle_recompose_o
         assert await pilot.hover("#editor-cancel") is True
         assert app.mouse_over is not None
         await click_when_settled(pilot, "#editor-cancel")
+        # The confirmation's suspend of the editor drops the hover, and a Pilot click moves no
+        # pointer: the pointer moves onto Yes, as a real one does before it clicks, so the hover
+        # the closing dialogs hand back is this one, not a stale check's on the covered editor.
+        await _wait_for_condition(
+            lambda: isinstance(app.screen, ConfirmDialog) and screen_is_settled(app, app.screen),
+            pilot,
+            description="confirmation laid out",
+        )
+        assert await pilot.hover("#confirm-yes") is True
+        assert app.mouse_over is app.screen.query_one("#confirm-yes")
         await click_when_settled(pilot, "#confirm-yes")
         await _wait_for_condition(
             lambda: app.screen is main_screen,

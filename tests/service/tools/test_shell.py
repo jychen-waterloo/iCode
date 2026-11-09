@@ -17,11 +17,11 @@ import pytest
 import chrys.service.tools.builtins.shell as shell_module
 from chrys.foundation.models.session_env import SessionEnvironment
 from chrys.foundation.platform import ShellInfo
+from chrys.foundation.platform.runtime_paths import build_shell_subprocess_env
 from chrys.foundation.text.tool_output import truncate_output as _truncate_output
 from chrys.service.tools.builtins.shell import (
     ShellTools,
     _await_pty_master_drained,
-    _build_subprocess_env,
     _prepare_pipe_command,
     _process_carriage_returns,
     _strip_ansi,
@@ -29,6 +29,7 @@ from chrys.service.tools.builtins.shell import (
 )
 from tests.support.gc_isolation import earlier_tests_heap_frozen
 from tests.support.pty_masters import linux_style_master
+from tests.support.stopped_child import STOPS_ITSELF
 from tests.support.waiting import wait_for
 
 IS_UNIX = sys.platform != "win32"
@@ -102,7 +103,7 @@ async def test_execute_pipe_closes_stdin_at_once(shell: ShellTools, monkeypatch:
 async def test_execute_python_cjk_output(shell: ShellTools, tmp_path: Path) -> None:
     """Python subprocess printing CJK text should produce correct UTF-8 output.
 
-    ``_build_subprocess_env`` sets ``PYTHONUTF8=1`` so Python children
+    ``build_shell_subprocess_env`` sets ``PYTHONUTF8=1`` so Python children
     always encode stdout as UTF-8 regardless of the system locale.
 
     The CJK literal lives in a UTF-8 script file (not in ``-c`` on the
@@ -144,8 +145,7 @@ async def test_execute_timeout(shell: ShellTools) -> None:
 
 @pytest.mark.skipif(not IS_UNIX, reason="POSIX stopped state only")
 async def test_execute_stopped_process_returns_promptly(shell: ShellTools) -> None:
-    script = "import os, signal, time; os.kill(os.getpid(), signal.SIGSTOP); time.sleep(30)"
-    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} | tail -n 20"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(STOPS_ITSELF)} | tail -n 20"
 
     with earlier_tests_heap_frozen():
         started = time.monotonic()
@@ -401,12 +401,41 @@ async def test_pty_pipeline_unlisted_shell_keeps_native_semantics(pipeline_statu
     assert "[exit_code: 0]" in result
 
 
-async def test_execute_with_working_dir(shell: ShellTools, tmp_path: str) -> None:
-    result = await shell.execute("pwd", reason="test", working_dir=str(tmp_path))
+def test_schema_uses_the_argument_names_other_harnesses_use(shell: ShellTools) -> None:
+    """Models carry ``workdir``/``max_output_tokens`` over from other harnesses; the old names are gone."""
+    execute = shell.tools()[0]
+    properties = execute.parameters()["properties"]
+
+    assert set(properties) == {"command", "reason", "timeout", "workdir", "max_output_tokens"}
+    assert "Use timeout, workdir, and max_output_tokens to control" in execute.description
+    assert "working_dir" not in execute.description
+    assert "max_tokens" not in execute.description.replace("max_output_tokens", "")
+
+
+@pytest.mark.parametrize("legacy", [{"working_dir": "sub"}, {"max_tokens": 100}])
+async def test_legacy_argument_names_are_rejected_before_the_command_runs(
+    tmp_path: Path, legacy: dict[str, object]
+) -> None:
+    """A call still using a retired name fails instead of running with that argument's default."""
+    (tmp_path / "sub").mkdir()
+    runtime = SessionEnvironment.capture()
+    execute = ShellTools(
+        SessionEnvironment(cwd=str(tmp_path), platform=runtime.platform, session_id=runtime.session_id)
+    ).tools()[0]
+
+    with pytest.raises(TypeError, match="Unexpected argument"):
+        await execute.invoke(arguments={"command": "echo ran > ran.txt", "reason": "test", **legacy})
+
+    assert not (tmp_path / "ran.txt").exists()
+    assert not (tmp_path / "sub" / "ran.txt").exists()
+
+
+async def test_execute_with_workdir(shell: ShellTools, tmp_path: str) -> None:
+    result = await shell.execute("pwd", reason="test", workdir=str(tmp_path))
     assert "[exit_code: 0]" in result
 
 
-async def test_execute_with_relative_working_dir_resolves_against_runtime_cwd(tmp_path: Path) -> None:
+async def test_execute_with_relative_workdir_resolves_against_runtime_cwd(tmp_path: Path) -> None:
     runtime = SessionEnvironment.capture()
     workspace = tmp_path / "workspace"
     subdir = workspace / "subdir"
@@ -420,7 +449,7 @@ async def test_execute_with_relative_working_dir_resolves_against_runtime_cwd(tm
     )
 
     cmd = _python_cwd_command(shell._shell.name)
-    result = await shell.execute(cmd, reason="test", working_dir="subdir")
+    result = await shell.execute(cmd, reason="test", workdir="subdir")
 
     assert "[exit_code: 0]" in result
     assert str(subdir.resolve()) in result
@@ -468,13 +497,13 @@ def test_tools_description_includes_guidance() -> None:
 # ───────────────────────── Output truncation ──────────────────────────
 
 
-async def test_execute_with_max_tokens(shell: ShellTools) -> None:
-    """Large output is truncated when max_tokens is small."""
+async def test_execute_with_max_output_tokens(shell: ShellTools) -> None:
+    """Large output is truncated when max_output_tokens is small."""
     if sys.platform == "win32":
         cmd = 'uv run python -c "for i in range(10000): print(i)"'
     else:
         cmd = "seq 1 10000"
-    result = await shell.execute(cmd, reason="test", max_tokens=200)
+    result = await shell.execute(cmd, reason="test", max_output_tokens=200)
     assert "truncated" in result.lower()
     assert "[exit_code: 0]" in result
 
@@ -787,26 +816,26 @@ async def test_pty_strips_ansi_from_output(shell: ShellTools) -> None:
     assert "normal" in result
 
 
-# ──────────────── _build_subprocess_env ──────────────────────────────────
+# ──────────────── build_shell_subprocess_env ──────────────────────────────────
 
 
 def test_build_env_sets_term_dumb() -> None:
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert env["TERM"] == "dumb"
 
 
 def test_build_env_sets_no_color() -> None:
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert env["NO_COLOR"] == "1"
 
 
 def test_build_env_sets_chrys_marker() -> None:
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert env["CHRYS"] == "1"
 
 
 def test_build_env_disables_pager() -> None:
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert env["GIT_PAGER"] == "cat"
     assert env["PAGER"] == "cat"
 
@@ -816,7 +845,7 @@ def test_build_env_removes_color_forcing(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("FORCE_COLOR", "1")
     monkeypatch.setenv("COLORTERM", "truecolor")
     monkeypatch.setenv("CLICOLOR_FORCE", "1")
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert "FORCE_COLOR" not in env
     assert "COLORTERM" not in env
     assert "CLICOLOR_FORCE" not in env
@@ -824,7 +853,7 @@ def test_build_env_removes_color_forcing(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_build_env_inherits_path() -> None:
     """PATH and other standard vars are inherited from the parent env."""
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert "PATH" in env
 
 
@@ -848,7 +877,7 @@ def test_build_env_demotes_runtime_path_when_frozen(
     monkeypatch.setenv("PYAPP", "1")
     monkeypatch.setenv("PATH", os.pathsep.join([str(runtime_bin), str(system_bin)]))
 
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     path_key = runtime_paths.path_env_key(env)
 
     assert path_key is not None
@@ -857,7 +886,7 @@ def test_build_env_demotes_runtime_path_when_frozen(
 
 def test_build_env_forces_utf8() -> None:
     """Subprocess env forces UTF-8 output for Python (and compatible tools)."""
-    env = _build_subprocess_env()
+    env = build_shell_subprocess_env()
     assert env["PYTHONUTF8"] == "1"
     assert env["PYTHONIOENCODING"] == "utf-8"
 

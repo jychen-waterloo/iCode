@@ -80,6 +80,7 @@ def _restore_lifecycle(*, session: SimpleNamespace, current: SimpleNamespace) ->
         trajectory_recorder=None,
         workspace_change_tracker=None,
         unregister_current_engine=lambda: None,
+        side_questions=None,
     )
 
 
@@ -549,7 +550,7 @@ async def test_post_run_clears_in_memory_service_session_after_failed_turn() -> 
         def remove_awaiting_sub_agents_marker(self) -> None:
             pass
 
-        def insert_turn_marker(self) -> None:
+        def insert_turn_marker(self, started_at: object = None) -> None:
             pass
 
     executor = SimpleNamespace(

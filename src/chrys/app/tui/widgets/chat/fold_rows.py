@@ -10,11 +10,12 @@ from dataclasses import dataclass, field
 from operator import add
 from typing import TYPE_CHECKING, Final, Literal
 
-from rich.cells import cell_len, get_character_cell_size
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
 from chrys.app.tui.i18n import render_str
+from chrys.app.tui.util.paths import middle_cut_path
 from chrys.app.tui.widgets.loading import component_text_style
 from chrys.foundation.hosted_tools import HostedToolFamily
 from chrys.foundation.i18n import Localizer, MessageDef, msg
@@ -63,23 +64,6 @@ def text_preview(text: str) -> str:
     Only the start of the text is read, enough to fill any row; the row cuts it to its width.
     """
     return sanitize_legacy_scalar(" ".join(text[:_PREVIEW_SOURCE_CHARS].split()))
-
-
-def text_tail(text: str, end: int, cells: int) -> str:
-    """*text* up to *end* on one line, as :func:`text_preview` reads its opening: the last of it that fits *cells*.
-
-    Once the start no longer fits, ``…`` stands for what is cut off before it.
-    """
-    shown = sanitize_legacy_scalar(" ".join(text[max(end - _PREVIEW_SOURCE_CHARS, 0) : end].split()))
-    if cell_len(shown) <= cells:
-        return shown
-    if cells <= 0:
-        return ""
-    start, width = len(shown), 1
-    while start and width + (cell := get_character_cell_size(shown[start - 1])) <= cells:
-        start -= 1
-        width += cell
-    return f"…{shown[start:]}"
 
 
 ToolOutcome = Literal["", "failed", "interrupted"]
@@ -325,7 +309,8 @@ class ToolTally:
 class FoldRow:
     """A folded row's text: the head, the counts after it, and the outcomes it always keeps in view.
 
-    The head ends with the space before the counts; the counts and outcomes follow one another after separators.
+    The head ends with what parts it from the counts, its space or colon included; the counts and outcomes follow one
+    another after separators.
     """
 
     head: str
@@ -335,6 +320,8 @@ class FoldRow:
     interrupted: str = ""
     kept: str = ""
     """What follows the head and stays in view as it gives way, as the outcomes do: a running sleep's time left."""
+    subject: str = ""
+    """A path in the last count's words that a narrow row cuts in its middle, its file name kept, before its end."""
 
     @property
     def lead(self) -> str:
@@ -369,7 +356,7 @@ def fold_row_styles(widget: Widget, prefix: str) -> FoldRowStyles:
 
 def fit_fold_row(row: FoldRow, width: int, styles: FoldRowStyles) -> Text:
     """*row* cut to *width* cells: what the head keeps in view and the outcomes keep their room, and the head and
-    detail give way first.
+    detail give way first, a path in them from its middle.
 
     A narrow terminal still shows that calls failed, or how long a sleep has left; only a row narrower than those
     themselves cuts them.
@@ -384,8 +371,16 @@ def fit_fold_row(row: FoldRow, width: int, styles: FoldRowStyles) -> Text:
             if row.counts or tail:
                 tail.append(_SEPARATOR, style=separator)
             tail.append(outcome, style=style)
+    counts = row.counts
+    room = max(width - tail.cell_len, 1) if tail else width
+    if width > 0 and row.subject and counts:
+        over = cell_len(row.head) + sum(map(cell_len, counts)) + cell_len(_SEPARATOR) * (len(counts) - 1) - room
+        before, found, after = counts[-1].rpartition(row.subject)
+        # With no room for even ``…``, the path goes as the row's end does.
+        if over > 0 and found and (cut := middle_cut_path(row.subject, cell_len(row.subject) - over)):
+            counts = (*counts[:-1], f"{before}{cut}{after}")
     text = Text(row.head)
-    for index, words in enumerate(row.counts):
+    for index, words in enumerate(counts):
         if index:
             text.append(_SEPARATOR, style=separator)
         text.append(words, style=styles.detail)
@@ -393,7 +388,7 @@ def fit_fold_row(row: FoldRow, width: int, styles: FoldRowStyles) -> Text:
         text.append_text(tail)
         return text
     if tail:
-        text.truncate(max(width - tail.cell_len, 1), overflow="ellipsis")
+        text.truncate(room, overflow="ellipsis")
         text.append_text(tail)
     text.truncate(width, overflow="ellipsis")
     return text

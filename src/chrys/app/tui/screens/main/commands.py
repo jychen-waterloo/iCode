@@ -47,6 +47,27 @@ _DESCRIPTION_CLEAR = msg(
 _DESCRIPTION_EXIT = msg("tui.commands.description.exit", fallback="Exit {app}")
 _DESCRIPTION_RESUME = msg("tui.commands.description.resume", fallback="Resume the most recent session in this mode")
 _DESCRIPTION_FORK = msg("tui.commands.description.fork", fallback="Fork the current session")
+_DESCRIPTION_BTW = msg("tui.commands.description.btw", fallback="Ask a side question without changing the main task")
+_MAN_BTW_BODY = msg(
+    "tui.man.btw.body",
+    fallback=(
+        "Use /btw <question> to ask using the conversation's existing text and\n"
+        "tool results. Use /btw alone to reopen this session's latest saved answer.\n\n"
+        "The main task continues separately. The side question cannot use tools\n"
+        "and does not enter the main conversation. Its card appears below the\n"
+        "chat, leaving the sidebar at full height.\n\n"
+        "The Answer tab opens by default, showing a thinking animation until\n"
+        "the complete answer is ready. The Question tab keeps your full question.\n"
+        "Long content scrolls within each tab. Previous/next buttons browse saved\n"
+        "answers without changing your selected tab, and are disabled while generating.\n\n"
+        "Completed answers are kept with the session. Clearing, deleting, or rolling\n"
+        "back to the starting screen removes them. Prompt-submission hooks also check\n"
+        "side questions. Failed or cancelled questions are not saved. Escape or the\n"
+        "close icon cancels a running question or hides the card, keeping saved\n"
+        "answers. Only one side question can run at a time."
+    ),
+    multiline=True,
+)
 _DESCRIPTION_RENAME = msg(
     "tui.commands.description.rename",
     fallback="Set or clear a custom session title",
@@ -68,7 +89,7 @@ _DESCRIPTION_DIFF = msg(
 )
 _DESCRIPTION_ROLLBACK = msg(
     "tui.commands.description.rollback",
-    fallback="Discard recent turns or return to a specific turn",
+    fallback="Discard recent turns or discard starting from a turn",
 )
 _DESCRIPTION_APPROVAL = msg(
     "tui.commands.description.approval",
@@ -80,9 +101,21 @@ _DESCRIPTION_MODELS = msg(
 )
 _DESCRIPTION_BUDDY = msg("tui.commands.description.buddy", fallback="Hatch, pet and look after your buddy")
 _DESCRIPTION_AGENTS = msg("tui.commands.description.agents", fallback="Manage agent configs")
+_DESCRIPTION_RELOAD = msg(
+    "tui.slash.reload_description",
+    fallback="Reload settings, profiles, memory, skills, hooks, MCP servers, themes and prompt shortcuts",
+)
+_MAN_RELOAD = msg(
+    "tui.man.reload.body",
+    fallback="Read settings, agent profiles, model profiles, hooks, themes and prompt shortcuts from disk, reconnect MCP servers, then rebuild the current agent with its memory and skills. Run this command when the current turn or workflow has finished.",
+)
 _DESCRIPTION_RUNTIME = msg(
     "tui.commands.description.runtime",
     fallback="Show active model, tools, skills, and files",
+)
+_DESCRIPTION_USAGE = msg(
+    "tui.commands.description.usage",
+    fallback="Show token usage and speed across all sessions",
 )
 _DESCRIPTION_SETTINGS = msg("tui.commands.description.settings", fallback="Open the Settings panel")
 _DESCRIPTION_MAN = msg("tui.commands.description.man", fallback="Show manual page for a command")
@@ -317,8 +350,8 @@ _MAN_DIFF_BODY = msg(
 _MAN_ROLLBACK_BODY = msg(
     "tui.man.rollback.body",
     fallback=(
-        "Roll back recent conversation turns.\n\n"
-        "Without arguments, opens the rollback picker at the most\n"
+        "Discard recent conversation turns.\n\n"
+        "Without arguments, opens the discard picker at the most\n"
         "recent available target. Use this picker when you want to\n"
         "discard conversation without restoring file changes.\n\n"
         'A bare number is a relative count. "/rollback 1" discards\n'
@@ -329,12 +362,13 @@ _MAN_ROLLBACK_BODY = msg(
         'Use "/rollback to 0" to return to the session start. A valid\n'
         "explicit target executes immediately.\n\n"
         "Both explicit forms restore eligible file changes by\n"
-        "default. The picker also selects file rollback by default;\n"
+        "default. The picker also selects file restoration by default;\n"
         "explicitly turn it off there to discard conversation only.\n\n"
         "Explicit commands immediately show a non-dismissible loading\n"
         "modal. Picker actions show it after confirmation. It blocks\n"
-        "interaction until rollback has completely finished.\n\n"
-        "Use with caution: this action cannot be undone."
+        "interaction until discarding finishes.\n\n"
+        'In the Discard dialog, turn 17 means "/rollback to 16".\n\n'
+        "Use with caution: this action is permanent."
     ),
     multiline=True,
 )
@@ -398,8 +432,24 @@ _MAN_RUNTIME_BODY = msg(
         "        - The active model profile and model ID\n"
         "        - Built-in tools grouped by category\n"
         "        - MCP tools grouped by server\n"
+        "        - Prompt shortcuts grouped by source folder\n"
         "        - Skills grouped by source directory\n"
         "        - Preconfigured memory files grouped by source"
+    ),
+    multiline=True,
+)
+_MAN_USAGE_BODY = msg(
+    "tui.man.usage.body",
+    fallback=(
+        "Open the token usage dialog, read from every saved session.\n\n"
+        "    Overview: new tokens by date range, their trend over time,\n"
+        "    and totals by model, source, project or model profile, with each\n"
+        "    model's speed. A model used through several of your profiles is\n"
+        "    shown once for each.\n"
+        "    Calendar: new tokens day by day, and one day's details.\n\n"
+        "    New tokens are the input not served from the provider's cache,\n"
+        "    plus the output, thinking included. Deleted sessions and external\n"
+        "    ACP agents are not counted."
     ),
     multiline=True,
 )
@@ -407,7 +457,7 @@ _MAN_SETTINGS_BODY = msg(
     "tui.man.settings.body",
     fallback=(
         "Open the Settings panel (F10), optionally on a tab.\n\n"
-        "    Tabs: general, models, security, sessions, tools, notifications.\n"
+        "    Tabs: general, models, safety, sessions, tools, notifications.\n"
         "    Changes are saved as you make them; the panel says when each\n"
         "    one takes effect (immediately, on close, or after a restart)."
     ),
@@ -445,6 +495,7 @@ class SlashCommandActionPort(Protocol):
     def quit(self) -> None: ...
     def resume_last_session(self) -> None: ...
     def fork_current_session(self) -> None: ...
+    def ask_side_question(self, question: str, /) -> None: ...
     def browse_sessions(self) -> None: ...
     def open_workflows(self) -> None: ...
     def open_guide(self) -> None: ...
@@ -459,7 +510,9 @@ class SlashCommandActionPort(Protocol):
     def open_model_config(self) -> None: ...
     def open_agent_config(self) -> None: ...
     def open_agent_config_tab(self, tab: str) -> None: ...
+    def reload_settings(self) -> None: ...
     def runtime_details(self) -> None: ...
+    def usage(self) -> None: ...
     def open_settings(self, tab: str) -> None: ...
     def show_man_pages(self, pages: list[ManPageSpec], *, start_index: int = 0) -> None: ...
     def notify_warning(
@@ -490,6 +543,7 @@ class SlashCommandActions:
     quit_app: Callable[[], None]
     resume_session: Callable[[], object]
     fork_session: Callable[[], object]
+    ask_side_question: Callable[[str], None]
     browse_session_list: Callable[[], None]
     workflow_selection: Callable[[], None]
     open_guide: Callable[[], None]
@@ -505,7 +559,9 @@ class SlashCommandActions:
     configure_model: Callable[[], None]
     configure_agent: Callable[[], None]
     configure_agent_tab: Callable[[str], None]
+    reload_settings: Callable[[], None]
     show_runtime_details: Callable[[], None]
+    show_usage: Callable[[], None]
     configure_settings: Callable[[str], None]
     show_manual_pages: Callable[[list[ManPageSpec], int], None]
     warn: Callable[[MessageRef | str, MessageRef | str, float | None], None]
@@ -600,6 +656,9 @@ class SlashCommandActions:
 
     def runtime_details(self) -> None:
         self.show_runtime_details()
+
+    def usage(self) -> None:
+        self.show_usage()
 
     def open_settings(self, tab: str) -> None:
         self.configure_settings(tab)
@@ -876,6 +935,14 @@ class MainSlashCommandRegistry:
                 man_page=_MAN_FORK_BODY.bind(),
             ),
             SlashCommandDef(
+                "btw",
+                _DESCRIPTION_BTW.bind(),
+                action=actions.ask_side_question,
+                allow_while_running=True,
+                synopsis="/btw [question]",
+                man_page=_MAN_BTW_BODY.bind(),
+            ),
+            SlashCommandDef(
                 "rename",
                 _DESCRIPTION_RENAME.bind(),
                 action=actions.rename_session,
@@ -1024,12 +1091,25 @@ class MainSlashCommandRegistry:
                 man_page=_MAN_AGENTS_BODY.bind(),
             ),
             SlashCommandDef(
+                "reload",
+                _DESCRIPTION_RELOAD.bind(),
+                action=lambda _: actions.reload_settings(),
+                man_page=_MAN_RELOAD.bind(),
+            ),
+            SlashCommandDef(
                 "runtime",
                 _DESCRIPTION_RUNTIME.bind(),
                 action=lambda _: actions.runtime_details(),
                 aliases=["details"],
                 allow_while_running=True,
                 man_page=_MAN_RUNTIME_BODY.bind(),
+            ),
+            SlashCommandDef(
+                "usage",
+                _DESCRIPTION_USAGE.bind(),
+                action=lambda _: actions.usage(),
+                allow_while_running=True,
+                man_page=_MAN_USAGE_BODY.bind(),
             ),
             SlashCommandDef(
                 "settings",

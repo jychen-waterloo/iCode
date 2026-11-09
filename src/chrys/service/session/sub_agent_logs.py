@@ -33,6 +33,7 @@ from chrys.foundation.platform.key_files import publish_owner_only_key, read_own
 from chrys.foundation.trajectory.metadata import read_analytics_item_id
 from chrys.foundation.util.filenames import bounded_safe_stem, safe_fs_name
 from chrys.foundation.util.lock import FileLock
+from chrys.foundation.util.sub_agent_context import SubAgentProgressTotals
 from chrys.service.session.message_metadata import TOOL_RESULT_METADATA_KEY
 from chrys.service.state.serializers import serialize_state
 
@@ -105,6 +106,16 @@ class SubAgentLogStats:
         self.total_tokens = total_tokens
         self.total_usage_tokens = total_usage_tokens
 
+    def totals(self, *, compactions: int = 0) -> SubAgentProgressTotals:
+        """The counters as the parent result keeps them, with the run's committed *compactions*."""
+        return SubAgentProgressTotals(
+            tool_calls=self.tool_call_count,
+            context_tokens=self.total_tokens,
+            usage_tokens=self.total_usage_tokens,
+            unreported_attempts=self.usage_unreported_attempts,
+            compactions=compactions,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SubAgentModelProvenance:
@@ -136,8 +147,6 @@ class SubAgentSessionLogWriter:
         working_dirs: list[str] | None = None,
         stats: SubAgentLogStats | None = None,
         runner: str = "kernel",
-        acp_command: str = "",
-        acp_args: list[str] | None = None,
     ) -> None:
         self._parent_session_dir = parent_session_dir
         self._parent_session_id = parent_session_id or ""
@@ -153,8 +162,8 @@ class SubAgentSessionLogWriter:
         self._working_dirs = list(working_dirs or ([primary_cwd] if primary_cwd else []))
         self._stats = stats or SubAgentLogStats()
         self._runner = runner
-        self._acp_command = acp_command
-        self._acp_args = list(acp_args or [])
+        self._acp_command = ""
+        self._acp_args: list[str] = []
         self._created_at = _utc_now()
         self._lock = asyncio.Lock()
         self._active = False

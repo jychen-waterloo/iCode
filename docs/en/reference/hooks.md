@@ -43,9 +43,9 @@ If a file cannot be decoded using the detected encoding, iCode reports a configu
 
 ## Loading configuration files
 
-Project hooks are not loaded by default, because they come with the repository you open. To load them, press **F10** in the terminal user interface (TUI) to open **Settings**, then turn on **Load project hooks** in the **Project trust** section of **Security** (`project.hooks_enabled`). When the working directory has project hooks that are not loaded, iCode shows a notice. Global hooks are always loaded.
+Project hooks are not loaded by default, because they come with the repository you open. To load them, press **F10** in the terminal user interface (TUI) to open **Settings**, then turn on **Load project hooks** in the **Project trust** section of **Safety** (`project.hooks_enabled`). When the working directory has project hooks that are not loaded, iCode shows a notice. Global hooks are always loaded.
 
-Editing a hook configuration file on disk does not take effect immediately. After editing, switch sessions or restart iCode to reload the configuration. Changes to hook scripts alone do not require a reload; the next time the hook is triggered, it uses the new script content.
+Editing a hook configuration file on disk does not take effect immediately. After editing, run `/reload` while idle, switch sessions, or restart iCode to load the configuration. Changes to hook scripts alone do not require a reload; the next time the hook is triggered, it uses the new script content.
 
 Enter `/runtime` in the TUI and open the **Hooks** tab to view the currently loaded project and global hooks. In a terminal, [`icode hook list`](#icode-hook-list) shows the hooks a session started in the current directory loads, and [`icode hook validate`](#icode-hook-validate) checks the configuration files.
 
@@ -102,7 +102,7 @@ All events provide the [base fields](#base-fields). Some events also provide add
 
 | Event | When it runs | Additional fields |
 | --- | --- | --- |
-| `session_start` | After the agent is ready. Triggered when iCode starts, a session is created, or the current session is rolled back to its beginning; not triggered by switching agents or models. | None |
+| `session_start` | After the agent is ready. Triggered when iCode starts, a session is created, or all turns in the current session are discarded; not triggered by switching agents or models. | None |
 | `session_restored` | After a saved session is restored. When a session is restored immediately after starting iCode, both `session_start` and `session_restored` may be triggered. | `restored_session_id`: ID of the saved session restored this time |
 | `session_end` | When the current session ends: exiting iCode, switching sessions, starting a new session, deleting or clearing the current session, or rolling it back to its beginning. | None |
 
@@ -117,8 +117,10 @@ All events provide the [base fields](#base-fields). Some events also provide add
 
 | Event | When it runs | Additional fields |
 | --- | --- | --- |
-| `user_prompt_submit` | When the user submits a message to start a new turn or an additional message while the agent is running. | `text`: the message text the user just submitted<br>`injected`: `true` for an additional message submitted during a run, `false` for a message starting a new turn |
+| `user_prompt_submit` | When the user submits a message to start a new turn, an additional message while the agent is running, or a `/btw` side question. | `text`: the submitted text; for a side question, the question without the `/btw` prefix<br>`injected`: `true` for an additional message sent to the running main turn; `false` for a new main-turn message or a side question<br>`side_question`: `true` for a side question; omitted for main-conversation messages (treat a missing value as `false`) |
 | `user_interrupt` | After the user interrupts the current turn. | None |
+
+To identify a message starting a new main turn, check both `not payload.get("injected", False)` and `not payload.get("side_question", False)`. A side question sends `injected: false` and `side_question: true`; it does not start a main turn or trigger `before_turn` / `after_turn`. Opening saved side questions with `/btw` alone does not trigger `user_prompt_submit`.
 
 ### Tool events
 
@@ -181,7 +183,7 @@ Only the following events apply decisions that blocking hooks return in the resu
 
 | Event | Effect |
 | --- | --- |
-| `user_prompt_submit` | Reject a message, [ask you to confirm it](#asking-you-to-confirm), or add a system reminder. A rejected message stays in the input box; if you sent it while the agent was running, the agent keeps working. |
+| `user_prompt_submit` | Reject a message, [ask you to confirm it](#asking-you-to-confirm), or add a system reminder. A rejected main-conversation message stays in the input box; if you sent it while the agent was running, the agent keeps working. A rejected side question shows the reason in its card; its reminders apply only to that side question. |
 | `before_tool_call` | Reject a tool call, [ask you to confirm it](#asking-you-to-confirm), or modify its arguments, but cannot approve a call or bypass approval. |
 | `after_tool_call` | Append context to the tool result, but cannot undo a call that has already occurred. |
 | `tool_error` | Append context to the tool error, but cannot undo a call that has already occurred. |
@@ -190,8 +192,8 @@ Only the following events apply decisions that blocking hooks return in the resu
 
 Async hooks run immediately when triggered, and the current operation continues. If a hook has not finished, iCode waits at the following points:
 
-- At the end of the current turn, it waits for async hooks triggered during that turn, except hooks triggered by `user_interrupt`.
-- When the current session ends, it waits for async hooks triggered by session events. Because `session_end` is triggered during session shutdown, iCode starts waiting for it immediately.
+- At the end of the current turn, it waits for async hooks triggered during that turn, except hooks triggered by `user_interrupt` or side questions.
+- When the current session ends, it waits for async hooks triggered by session events or side questions. Because `session_end` is triggered during session shutdown, iCode starts waiting for it immediately.
 
 The wait at session shutdown is limited by `shutdown_grace_seconds`. Each async hook is also subject to its own `timeout_seconds` limit.
 
@@ -236,6 +238,22 @@ Matching follows these rules:
 - Condition values must be strings. In YAML, quote numbers and booleans: an unquoted value such as `equals: 10` or `equals: true` is a configuration error that disables every hook in the file.
 - Non-string arguments are converted with Python's `str()` before comparison, so JSON `true` and `false` become `True` and `False` (match them with `equals: "True"`), and lists and objects use Python's representation.
 - Use YAML single-quoted strings for regular expressions where possible; backslashes must be escaped inside double quotes. A hook whose regular expression is invalid is skipped when the session starts and a warning names the hook and its file; the other hooks in the file still run.
+
+#### Renamed shell arguments
+
+The shell tool's `working_dir` argument is now `workdir`, and `max_tokens` is now `max_output_tokens`. Hooks written for the old names keep working for now:
+
+- `match.args` on an old name matches the new argument of shell calls.
+- A hook script still finds the old names in `tool.args` of a shell call, next to the new ones.
+- An old name a hook returns in `args_override` changes the new argument.
+
+A durable hook task left unfinished by an earlier version of iCode, retried after the update, gives its script the new names as well as the old ones.
+
+Support for the old names will be removed in a later release, so rename them in hooks for the shell and update scripts to read and return the new names. `icode hook validate` reports a hook that still uses an old name as `retired_shell_arg`:
+
+- A hook with `tool_kind: shell`: rename the argument.
+- A hook without `tool_kind`, warned for `working_dir` only: rename it and add `tool_kind: shell` only if the hook is for the shell. A tool name alone does not settle it, since another tool, such as an MCP tool, may have any name, including a shell's, and keeps its own `working_dir`; a hook for both needs one hook per tool. `max_tokens` is not reported here, because `read_file` and `web_fetch` take it too.
+- A hook for another tool kind is not warned: it matches that tool's own arguments.
 
 ## Run configuration
 
@@ -708,6 +726,7 @@ These problems are warnings:
 | `on_error_block_ignored` | `on_error: block` is set on a hook that cannot block, so its failures are handled as `warn` |
 | `durable_blocking` | `delivery: durable` is set on a blocking hook, which does not use it |
 | `broad_before_tool_call` | A `before_tool_call` hook has no match conditions, so it runs for every tool call |
+| `retired_shell_arg` | `match.args` uses an old shell argument name: `working_dir`, or `max_tokens` with `tool_kind: shell`; it still matches shell calls for now. See [Renamed shell arguments](#renamed-shell-arguments) |
 | `duplicate_id_across_files` | The project and global files both define this `id`; both hooks run |
 | `shadowed_file` | The folder holds more than one hook configuration file; only the first is read (see [Configuration file locations](#configuration-file-locations)) |
 | `program_not_found` | The program that runs an enabled hook's command or script is not found on `PATH`, or on Windows is only the placeholder that offers Python from the Microsoft Store |

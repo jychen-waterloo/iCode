@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 from textual.content import Content
 
 from chrys.app.tui.i18n import LocaleController
@@ -13,6 +16,7 @@ from chrys.app.tui.widgets.chrome.commands import (
     ManPageVerbatimBlock,
     is_slash_command_candidate,
 )
+from chrys.app.tui.widgets.chrome.file_index import ProjectPathIndex
 from chrys.app.tui.widgets.chrome.file_scanner import ProjectPathSuggestion
 from chrys.app.tui.widgets.chrome.suggestion_list import SuggestionItem
 from chrys.foundation.config.settings import Settings
@@ -24,10 +28,12 @@ from chrys.service.profiles.models.schema import ModelProfile
 from tests.support.tui_helpers import (
     AgentProfileStub,
     AgentRegistryStub,
+    SuggestionScreen,
     make_suggestion_handler,
     make_suggestion_screen,
     scan_result,
 )
+from tests.support.waiting import ENGINE_TURN_TIMEOUT
 
 
 def test_slash_command_candidate_rejects_code_comments_paths_and_multiline_pastes() -> None:
@@ -110,6 +116,16 @@ def test_slash_suggestions_dismiss_for_non_command_paste() -> None:
     assert handler.suggestion_mode is None
 
 
+def test_multiline_side_question_dismisses_command_suggestions() -> None:
+    screen = make_suggestion_screen()
+    handler = make_suggestion_handler(screen)
+    handler.build_slash_commands()
+    handler._suggestion_mode = "commands"
+    handler.on_text_changed("/btw\nquestion")
+    assert handler.suggestion_mode is None
+    assert is_slash_command_candidate("/btw\nquestion")
+
+
 def test_build_slash_commands_uses_agents_and_no_legacy_entries() -> None:
     screen = make_suggestion_screen()
     handler = make_suggestion_handler(screen)
@@ -118,6 +134,7 @@ def test_build_slash_commands_uses_agents_and_no_legacy_entries() -> None:
     names = [c.name for c in commands]
 
     assert "agents" in names
+    assert "reload" in names
     assert "runtime" in names
     assert "settings" in names
     assert "notifications" not in names
@@ -202,7 +219,7 @@ def test_rollback_man_page_documents_direct_relative_and_absolute_forms() -> Non
     commands = handler.build_slash_commands()
     rollback = next(command for command in commands if command.name == "rollback")
 
-    assert format_message(rollback.description) == "Discard recent turns or return to a specific turn"
+    assert format_message(rollback.description) == "Discard recent turns or discard starting from a turn"
     assert rollback.subcommands is None
     assert rollback.synopsis is not None
     assert rollback.options_help is not None
@@ -287,6 +304,15 @@ def test_dispatch_runtime_opens_details_for_agent_without_status_trail() -> None
     assert handler.dispatch_slash_command("/runtime") is True
     assert handler.dispatch_slash_command("/details") is True
     assert screen.opened == ["runtime", "runtime"]
+
+
+def test_dispatch_usage_opens_the_usage_dialog() -> None:
+    screen = make_suggestion_screen()
+    handler = make_suggestion_handler(screen)
+    handler.build_slash_commands()
+
+    assert handler.dispatch_slash_command("/usage") is True
+    assert screen.opened == ["usage"]
 
 
 def test_dispatch_fork_requests_session_fork() -> None:
@@ -379,7 +405,14 @@ def test_typing_space_switches_to_subcommand_mode_for_theme_and_agents() -> None
     assert screen.suggestion_list.last_mode == "subcommands"
 
 
-def test_slash_suggestions_include_runtime_skills_in_separate_section() -> None:
+async def _finish_workers(screen: SuggestionScreen) -> None:
+    """Await the shortcut reads opening or filtering the list started; a started worker is the test's to finish."""
+    assert screen.workers
+    for worker in screen.workers:
+        await asyncio.wait_for(worker.wait(), ENGINE_TURN_TIMEOUT)
+
+
+async def test_slash_suggestions_include_runtime_skills_in_separate_section() -> None:
     screen = make_suggestion_screen()
     screen.state.runtime.details = AgentRuntimeDetails(
         skill_details=[RuntimeSkillDetails(name="review", description="Review code and identify issues")]
@@ -388,6 +421,8 @@ def test_slash_suggestions_include_runtime_skills_in_separate_section() -> None:
     handler.build_slash_commands()
 
     handler.on_slash_triggered()
+    # Opening the list rereads prompt shortcut files on a worker: let it finish before reading the list.
+    await _finish_workers(screen)
 
     skill_items = [
         item for item in screen.suggestion_list.last_items if isinstance(item, SuggestionItem) and item.kind == "skill"
@@ -398,7 +433,7 @@ def test_slash_suggestions_include_runtime_skills_in_separate_section() -> None:
     assert skill_items[0].marquee_start == len("/review  ")
 
 
-def test_slash_filter_matches_runtime_skills() -> None:
+async def test_slash_filter_matches_runtime_skills() -> None:
     screen = make_suggestion_screen()
     screen.state.runtime.details = AgentRuntimeDetails(
         skill_details=[RuntimeSkillDetails(name="review", description="Review code")]
@@ -413,9 +448,11 @@ def test_slash_filter_matches_runtime_skills() -> None:
         isinstance(item, SuggestionItem) and item.kind == "skill" and item.value == "review"
         for item in screen.suggestion_list.last_items
     )
+    # Filtering before any shortcut read started one: finish it.
+    await _finish_workers(screen)
 
 
-def test_shadowed_runtime_skill_is_visible_but_disabled() -> None:
+async def test_shadowed_runtime_skill_is_visible_but_disabled() -> None:
     screen = make_suggestion_screen()
     screen.state.runtime.details = AgentRuntimeDetails(
         skill_details=[RuntimeSkillDetails(name="runtime", description="Runtime-like skill")]
@@ -424,6 +461,8 @@ def test_shadowed_runtime_skill_is_visible_but_disabled() -> None:
     handler.build_slash_commands()
 
     handler.on_slash_triggered()
+    # Opening the list rereads prompt shortcut files on a worker: let it finish before reading the list.
+    await _finish_workers(screen)
 
     skill = next(
         item
@@ -434,7 +473,7 @@ def test_shadowed_runtime_skill_is_visible_but_disabled() -> None:
     assert skill.disabled_reason == "shadowed by /runtime"
 
 
-def test_suggestion_chrome_renders_chinese_at_show_boundary_without_translating_payloads() -> None:
+async def test_suggestion_chrome_renders_chinese_at_show_boundary_without_translating_payloads() -> None:
     """Chrome localizes at the show boundary; payloads stay verbatim.
 
     Localized descriptions and man-page bodies are covered by
@@ -454,6 +493,7 @@ def test_suggestion_chrome_renders_chinese_at_show_boundary_without_translating_
     commands = handler.build_slash_commands()
 
     handler.on_slash_triggered()
+    await _finish_workers(screen)
 
     assert screen.suggestion_list.last_title == "命令"
     command = commands[0]
@@ -496,7 +536,7 @@ def test_suggestion_chrome_renders_chinese_at_show_boundary_without_translating_
         suggestion_budget=1,
         source_truncations={"rg": True},
     )
-    index = handler._build_file_index(scan)
+    index = ProjectPathIndex.build(scan)
     truncation = handler._file_suggestion_items([], index=index)[0]
     assert truncation.label == "此有限索引之外还有更多文件"
     assert truncation.disabled_reason == "已索引 1 个文件 / 1 行"
@@ -535,3 +575,24 @@ def test_stale_command_suggestion_selection_is_ignored() -> None:
 
     assert screen.opened == []
     assert screen.submitted == []
+
+
+async def test_opening_the_list_under_new_folders_starts_one_shortcut_read() -> None:
+    """A changed workspace starts one read, not one per caller asking for the shortcuts while it is out."""
+    screen = make_suggestion_screen()
+    handler = make_suggestion_handler(screen)
+    handler.build_slash_commands()
+
+    handler.on_slash_triggered()
+    await _finish_workers(screen)
+    landed = len(screen.workers)
+
+    screen._set_workspace_cwd(str(Path.cwd() / "elsewhere"))
+    handler.on_slash_triggered()
+    for text in ("/z", "/zz", "/zzx"):
+        handler.on_text_changed(text)
+
+    started = screen.workers[landed:]
+    for worker in started:
+        await asyncio.wait_for(worker.wait(), ENGINE_TURN_TIMEOUT)
+    assert len(started) == 1

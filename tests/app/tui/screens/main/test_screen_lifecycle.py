@@ -21,7 +21,7 @@ from chrys.app.tui.screens.main.state import MainScreenServices, MainScreenState
 from chrys.app.tui.screens.main.tool_action_bridge import ToolActionBridge
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.models.ask_user import AskUserAnswer
-from tests.support.tui_helpers import make_live_mutation, stale_file_cache
+from tests.support.tui_helpers import make_live_mutation
 from tests.support.waiting import wait_for
 
 
@@ -42,6 +42,9 @@ def test_unmount_shuts_down_buddy_before_flushing_notifications() -> None:
     async def close_workflow() -> None:
         calls.append("workflow_close")
 
+    async def close_btw() -> None:
+        calls.append("btw_close")
+
     async def close_workspace_branch() -> None:
         calls.append("workspace_branch_close")
 
@@ -49,6 +52,7 @@ def test_unmount_shuts_down_buddy_before_flushing_notifications() -> None:
         _events=SimpleNamespace(close_approval_waits=lambda: calls.append("approval_waits_close")),
         _workflow_timer=None,
         _workflow=SimpleNamespace(close=close_workflow),
+        _btw=SimpleNamespace(shutdown=close_btw),
         _subscriptions=_Subscriptions(),
         _suggestions=SimpleNamespace(buddy_command=_BuddyCommand()),
         _session_title=SimpleNamespace(stop_activity=lambda: calls.append("session_title_stop")),
@@ -62,6 +66,7 @@ def test_unmount_shuts_down_buddy_before_flushing_notifications() -> None:
     assert calls == [
         "approval_waits_close",
         "workflow_close",
+        "btw_close",
         "unsubscribe",
         "session_title_stop",
         "workspace_branch_close",
@@ -97,6 +102,7 @@ def _make_screen_for_running_toggle() -> SimpleNamespace:
         events.attention_resets += 1
 
     events.reset_chat_attention = reset_chat_attention
+    suggestion_calls: list[str] = []
 
     def query_one(cls):
         if cls is InputBar:
@@ -110,7 +116,11 @@ def _make_screen_for_running_toggle() -> SimpleNamespace:
         _session_title=SimpleNamespace(run_started=lambda: None, sync_activity=lambda: None),
         _events=events,
         _live_diff=LiveDiffTracker(),
-        _suggestions=SimpleNamespace(file_cache=None),
+        _suggestions=SimpleNamespace(
+            mark_file_index_stale=lambda: suggestion_calls.append("mark_stale"),
+            discard_file_index=lambda: suggestion_calls.append("discard"),
+        ),
+        _suggestion_calls=suggestion_calls,
         _workflow=SimpleNamespace(workflow_mode=False),
         _workspace_actions=workspace_actions,
         _navigation=SimpleNamespace(dismiss_interrupt_confirm=lambda: None),
@@ -121,24 +131,23 @@ def _make_screen_for_running_toggle() -> SimpleNamespace:
     )
 
 
-def test_set_agent_running_false_invalidates_file_cache() -> None:
-    """When the agent stops, the ``@`` file cache must be dropped.
+def test_set_agent_running_false_marks_the_file_index_stale() -> None:
+    """When the agent stops, the resident ``@`` snapshot is marked stale, not dropped.
 
-    Agent tool calls (``write_file``/``edit_file``/shell) can create or
-    delete files during a turn; without invalidation the next ``@``
-    trigger would show a stale list.  ``_set_agent_running`` is the
-    single chokepoint for all stop transitions (normal completion,
-    error, user interrupt).
+    Agent tool calls (``write_file``/``edit_file``/shell) can create or delete
+    files during a turn, so the next trigger rescans — but the snapshot keeps
+    answering it while that rescan runs.
+    ``_set_agent_running`` is the single chokepoint for all stop transitions
+    (normal completion, error, user interrupt).
     """
     from chrys.app.tui.screens.main.screen import MainScreen
 
     screen = _make_screen_for_running_toggle()
-    screen._suggestions.file_cache = stale_file_cache("src/a.py", "src/b.py")  # prior @ scan
     screen._state.run.agent_running = True
 
     MainScreen._set_agent_running(screen, False)
 
-    assert screen._suggestions.file_cache is None
+    assert screen._suggestion_calls == ["mark_stale"]
     assert screen._state.run.agent_running is False
 
 
@@ -160,22 +169,19 @@ def test_a_stopped_run_checks_the_working_folder_once(stopped_by: str) -> None:
     assert screen._workspace_actions.after_turn_checks == 1
 
 
-def test_set_agent_running_true_preserves_file_cache() -> None:
-    """Cache is invalidated only on stop — starting a turn keeps it intact.
+def test_set_agent_running_true_leaves_the_file_index_alone() -> None:
+    """Staleness is recorded only on stop — starting a turn changes nothing.
 
-    The cache is per-turn staleness: we don't want to rebuild on every
-    user prompt, only after the agent has had a chance to mutate the
-    filesystem.
+    We don't want to invalidate on every user prompt, only after the agent
+    has had a chance to mutate the filesystem.
     """
     from chrys.app.tui.screens.main.screen import MainScreen
 
     screen = _make_screen_for_running_toggle()
-    cached = stale_file_cache("src/a.py", "src/b.py")
-    screen._suggestions.file_cache = cached
 
     MainScreen._set_agent_running(screen, True)
 
-    assert screen._suggestions.file_cache is cached
+    assert screen._suggestion_calls == []
     assert screen._state.run.agent_running is True
 
 
@@ -186,13 +192,11 @@ def test_running_generation_changes_only_when_a_new_turn_starts() -> None:
     MainScreen._set_agent_running(screen, True)
     assert screen._state.run.generation == 1
     screen._live_diff.file_mutations["/repo/live.py"] = make_live_mutation("before", "after", "modify")
-    cached = stale_file_cache("src/warm.py")
-    screen._suggestions.file_cache = cached
 
     MainScreen._set_agent_running(screen, True)
     assert screen._state.run.generation == 1
     assert "/repo/live.py" in screen._live_diff.file_mutations
-    assert screen._suggestions.file_cache is cached
+    assert screen._suggestion_calls == []
     assert screen._events.attention_resets == 1
 
     MainScreen._set_agent_running(screen, False)

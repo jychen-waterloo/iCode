@@ -26,6 +26,7 @@ from chrys.foundation.events.types import (
     Error,
     ImageAttachmentCompressionFinished,
     ImageAttachmentCompressionStarted,
+    RollbackSnapshotsChanged,
     RuntimeModelDetails,
     TurnStarted,
     UserMessage,
@@ -37,6 +38,7 @@ from chrys.foundation.models.workspace import Workspace
 from chrys.foundation.trajectory.event_types import EventType
 from chrys.kernel import Content, Message
 from chrys.kernel.middleware import ChatContext
+from chrys.orchestration.engine.execution import RetryInput
 from chrys.orchestration.engine.run.attachments import (
     MAX_IMAGE_BYTES,
     AttachmentDiscoveryResult,
@@ -51,6 +53,7 @@ from chrys.service.agent_middleware.system_reminder import SystemReminderMiddlew
 from chrys.service.hooks.events import HookEvent
 from chrys.service.hooks.schema import HookDecision
 from chrys.service.mutations.workspace_changes import WorkspaceChangeTracker
+from chrys.service.session.history import FreshTurnCleanup, SessionHistoryManager
 from chrys.service.session.runtime_metadata import SessionRuntimeMetadata
 from chrys.service.trajectory.preparation import PreparationOutcome, PreparationTrace
 from chrys.service.trajectory.state import TRAJECTORY_STATE_KEY
@@ -91,7 +94,11 @@ async def run_and_save(
     run_scope=None,
     injection_window=None,
     user_message_id: str | None = None,
+    typed_text: str | None = None,
+    cleanup_required: bool = False,
 ) -> None:
+    if cleanup_required:
+        host._history.prepare_fresh_turn()
     await make_turn_runner(
         current=host.current,
         session=host.session,
@@ -117,6 +124,7 @@ async def run_and_save(
         run_scope=run_scope,
         injection_window=injection_window,
         user_message_id=user_message_id,
+        typed_text=typed_text,
     )
 
 
@@ -198,10 +206,10 @@ class _Executor:
     def record_pre_run_interrupt(self) -> None:
         self.was_interrupted = True
 
-    def begin_invocation(self) -> None:
+    def begin_invocation(self, *, typed_text: str | None = None) -> None:
         pass
 
-    def fresh_request(self, contents: list[Any], created_at: Any = None):
+    def fresh_request(self, contents: list[Any], created_at: Any = None, *, typed_text: str | None = None):
         return contents, created_at
 
     @asynccontextmanager
@@ -260,14 +268,17 @@ class _History:
     def remove_trailing_markers(self) -> None:
         raise AssertionError("history markers should not be removed")
 
-    def remove_orphaned_user_message(self) -> None:
-        raise AssertionError("orphaned user message should not be removed")
+    def prepare_fresh_turn(self, *, other_records_present: bool = False) -> FreshTurnCleanup:
+        raise AssertionError("failed turn should not be cleaned")
 
     def ensure_user_message(self, *_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("ensure_user_message should not be called")
 
     def tag_last_user_message(self, *_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("tag_last_user_message should not be called")
+
+    def images_over(self, _max_bytes: int) -> list[object]:
+        return []
 
     def merge_loop_messages(self, _loop_recorder: object, *, insert_index: int | None = None) -> None:
         return None
@@ -302,7 +313,7 @@ class _History:
     def remove_all_status_markers(self) -> None:
         return None
 
-    def insert_turn_marker(self) -> None:
+    def insert_turn_marker(self, started_at: object = None) -> None:
         return None
 
 
@@ -319,8 +330,7 @@ class _MutableHistory(_History):
     def __init__(self, messages: list[Message]) -> None:
         super().__init__()
         self.messages = messages
-        self.removed_trailing_markers = 0
-        self.removed_orphans = 0
+        self.state = {"messages": self.messages, "turn_counter": 1}
 
     def has_trailing_error_markers(self) -> bool:
         for message in reversed(self.messages):
@@ -330,19 +340,12 @@ class _MutableHistory(_History):
             return chrys_kind in HistoryMarkerKind.STATUS_MARKERS
         return False
 
-    def remove_trailing_markers(self) -> None:
-        while self.messages:
-            chrys_kind = self.messages[-1].additional_properties.get(HistoryMarkerKind.KEY)
-            if chrys_kind in HistoryMarkerKind.SESSION_COUNT_EXCLUDED:
-                self.messages.pop()
-                self.removed_trailing_markers += 1
-                continue
-            break
-
-    def remove_orphaned_user_message(self) -> None:
-        if self.messages and self.messages[-1].role == "user":
-            self.messages.pop()
-            self.removed_orphans += 1
+    def prepare_fresh_turn(self, *, other_records_present: bool = False) -> FreshTurnCleanup:
+        manager = SessionHistoryManager()
+        manager.bind(self.state)
+        removed = manager.prepare_fresh_turn(other_records_present=other_records_present)
+        self.messages = manager.messages
+        return removed
 
     def ensure_user_message(self, *_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("ensure_user_message should not be called")
@@ -443,6 +446,8 @@ class _Host:
         run_scope=None,
         injection_window=None,
         user_message_id: str | None = None,
+        typed_text: str | None = None,
+        cleanup_required: bool = False,
     ) -> None:
         await run_and_save(
             self,
@@ -453,6 +458,8 @@ class _Host:
             run_scope=run_scope,
             injection_window=injection_window,
             user_message_id=user_message_id,
+            typed_text=typed_text,
+            cleanup_required=cleanup_required,
         )
 
     async def _post_run(self) -> None:
@@ -544,7 +551,7 @@ async def test_turn_preamble_closes_exactly_once_on_every_dispatch_exit(
                 persistence=host._persistence,
                 on_successful_turn=host._on_successful_turn,
                 retry_and_save=host.retry_and_save,
-            ).run_retry("retry note")  # type: ignore[arg-type]
+            ).run_retry(RetryInput("retry note"))  # type: ignore[arg-type]
         else:
             await run_and_save(host, "hello", contents=["hello"])
 
@@ -594,7 +601,7 @@ async def test_turn_preamble_start_ack_cancellation_leaves_no_open_interval(
                 persistence=host._persistence,
                 on_successful_turn=host._on_successful_turn,
                 retry_and_save=host.retry_and_save,
-            ).run_retry("retry note")  # type: ignore[arg-type]
+            ).run_retry(RetryInput("retry note"))  # type: ignore[arg-type]
         else:
             await run_and_save(host, "hello", contents=["hello"])
 
@@ -722,7 +729,8 @@ async def test_run_and_save_sends_image_content_when_model_profile_supports_visi
     await run_and_save(host, "describe @shot.png", created_at=created_at)
 
     events = [event for event in host._bus.events if not isinstance(event, TurnStarted)]
-    assert events == []
+    assert [type(event) for event in events] == [RollbackSnapshotsChanged]
+    assert events[0].session_id == "session-1"
     assert host.current.loaded.bindings.user_message == "describe @shot.png"
     assert len(host.current.loaded.bindings.run_calls) == 1
     contents, call_created_at = host.current.loaded.bindings.run_calls[0]
@@ -1011,7 +1019,7 @@ async def test_run_and_save_loads_small_image_attachments_off_event_loop(
     loop_progress_before_executor: list[bool] = []
     progress_marked = threading.Event()
 
-    def slow_load_image_attachments(mentions: list[Any]) -> AttachmentParseResult:
+    def slow_load_image_attachments(mentions: list[Any], *, max_bytes: int) -> AttachmentParseResult:
         # Hold the load open until the marker task has provably run on
         # the event loop.  Loaded off-loop (executor thread), this
         # handshake completes immediately; if the load ever regresses
@@ -1108,7 +1116,7 @@ async def test_fresh_user_message_stale_admission_suppresses_attachment_error_af
             errors=[],
         )
 
-    def load_attachments(_mentions: list[ImageMention]) -> AttachmentParseResult:
+    def load_attachments(_mentions: list[ImageMention], *, max_bytes: int) -> AttachmentParseResult:
         entered.set()
         release.wait(timeout=2)
         return AttachmentParseResult(attachments=[], errors=["@stale.png: stale load error"])
@@ -1203,7 +1211,7 @@ async def test_run_and_save_emits_compression_events_for_oversize_images(
         f.truncate(MAX_IMAGE_BYTES + 1)
     host = _Host(tmp_path, monkeypatch=monkeypatch, vision=True)
 
-    def fake_load_image_attachments(mentions: list[Any]) -> AttachmentParseResult:
+    def fake_load_image_attachments(mentions: list[Any], *, max_bytes: int) -> AttachmentParseResult:
         mention = mentions[0]
         return AttachmentParseResult(
             attachments=[
@@ -1226,6 +1234,7 @@ async def test_run_and_save_emits_compression_events_for_oversize_images(
     assert [type(event) for event in events] == [
         ImageAttachmentCompressionStarted,
         ImageAttachmentCompressionFinished,
+        RollbackSnapshotsChanged,
     ]
     assert events[0].image_count == 1
     assert events[1].image_count == 1
@@ -1245,7 +1254,7 @@ async def test_run_and_save_times_out_slow_image_compression(
         f.truncate(MAX_IMAGE_BYTES + 1)
     host = _Host(tmp_path, monkeypatch=monkeypatch, vision=True)
 
-    def slow_load_image_attachments(_mentions: list[Any]) -> AttachmentParseResult:
+    def slow_load_image_attachments(_mentions: list[Any], *, max_bytes: int) -> AttachmentParseResult:
         time.sleep(0.05)
         return AttachmentParseResult(attachments=[], errors=[])
 
@@ -1342,7 +1351,7 @@ async def test_fresh_image_load_error_publishes_legacy_and_localized_messages(
         bus=host._bus,
         history=host._history,
         fsm=host._fsm,
-        load_attachments=lambda _mentions: AttachmentParseResult(attachments=[], errors=load_errors),
+        load_attachments=lambda _mentions, *, max_bytes: AttachmentParseResult(attachments=[], errors=load_errors),
     )
 
     result = await preparer.prepare_fresh(
@@ -1472,8 +1481,8 @@ async def test_text_only_follow_up_ignores_failed_orphan_image_turn(
     assert len(host.current.loaded.bindings.run_calls) == 1
     contents, _created_at = host.current.loaded.bindings.run_calls[0]
     assert contents == ["plain follow-up"]
-    assert history.removed_trailing_markers == 2
-    assert history.removed_orphans == 1
+    assert history.messages == []
+    assert history.state["turn_counter"] == 0
 
 
 @pytest.mark.asyncio

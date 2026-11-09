@@ -61,23 +61,49 @@ def with_count_hint(label: Text, raw: str) -> Text:
     return hinted
 
 
+def format_compact_count(n: int) -> str:
+    """Format a count as k or m, dropping a trailing ``.0`` (``200k``, ``1.0m``).
+
+    The unit is chosen after rounding, so a count never reads ``1000.0k``
+    (``999_950`` → ``1.0m``). ``format_token_count`` always keeps one decimal;
+    this is the form the context-size labels show.
+    """
+    if n < 1_000:
+        return str(n)
+    if n >= 999_950:
+        count, unit = n / 1_000_000, "m"
+    else:
+        count, unit = n / 1_000, "k"
+    text = f"{count:.0f}" if count == int(count) else f"{count:.1f}"
+    return f"{text}{unit}"
+
+
 def format_byte_size(size_bytes: int) -> str:
-    """Format bytes as a human-readable string (e.g. '1.2 MB')."""
+    """Format bytes as a human-readable string (e.g. '1.2 MB').
+
+    A unit is used only while its rounded value fits inside it, so a size never
+    reads ``1024.0 KB`` (1,048,575 bytes is ``1.0 MB``).
+    """
     if size_bytes < 1024:
         return f"{size_bytes} B"
     kib = size_bytes / 1024
-    if kib < 1024:
+    if round(kib, 1) < 1024:
         return f"{kib:.1f} KB"
     mib = kib / 1024
-    if mib < 1024:
+    if round(mib, 1) < 1024:
         return f"{mib:.1f} MB"
     gib = mib / 1024
     return f"{gib:.1f} GB"
 
 
 def elapsed_parts(seconds: float) -> tuple[tuple[int, str], ...]:
-    """Decompose elapsed seconds into at most two adjacent units, seconds through days."""
+    """Decompose elapsed seconds into at most two adjacent units, milliseconds through days.
+
+    A duration under one second is milliseconds alone, truncated as the larger units are.
+    """
     total = max(0, int(seconds))
+    if total == 0:
+        return ((max(0, int(seconds * 1000)), "ms"),)
     for scale, unit, remainder_scale, remainder_unit in (
         (86400, "d", 3600, "h"),
         (3600, "h", 60, "m"),
@@ -91,7 +117,7 @@ def elapsed_parts(seconds: float) -> tuple[tuple[int, str], ...]:
 
 
 def format_elapsed(seconds: float) -> str:
-    """Format elapsed seconds using at most two compact units."""
+    """Format elapsed seconds using at most two compact units, milliseconds under a second."""
     return " ".join(
         f"{value:02d}{unit}" if index else f"{value}{unit}"
         for index, (value, unit) in enumerate(elapsed_parts(seconds))

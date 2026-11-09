@@ -69,6 +69,8 @@ icode agent list
 
 列表中出现“代码审查”，说明配置已加载。如果未出现，请检查启动时显示的 YAML 解析或字段校验警告，并确认文件位于用户智能体配置目录中。
 
+`icode agent list` 和 `icode model list` 从用户配置目录读取配置，不依赖工作目录；即使启动命令时所在的目录已被删除，也可以列出配置。
+
 ## 顶层字段说明
 
 | 字段 | 类型 | 默认值 | 说明 |
@@ -81,6 +83,7 @@ icode agent list
 | `instructions` | 字符串或字符串列表 | 空 | 提供给内置类型智能体的主要行为指令。写成列表时，各项按每项一行合成一段文本。外部 ACP 配置会忽略此字段。 |
 | `model` | 对象 | `{}` | 绑定模型配置，见 [model](#model)。 |
 | `tools` | 对象 | `{}` | 配置内置工具、MCP 和 Shell 过滤，见 [tools](#tools)。 |
+| `extensions` | 字符串列表 | `[]` | 智能体加载的 Python 扩展，见 [extensions](#extensions)。 |
 | `approval` | 对象 | 见下文 | 配置哪些工具调用需要审批，见 [approval](#approval)。 |
 | `skills` | 对象 | 见下文 | 配置 Skill 来源和内嵌 Skill，见 [skills](#skills)。 |
 | `memory` | 对象 | `{}` | 配置自动加载的参考文件，见 [memory](#memory)。 |
@@ -154,7 +157,7 @@ tools:
         Authorization: "Bearer {{MCP_API_TOKEN}}"
 ```
 
-`env` 和 `headers` 都是键值映射：左侧填写变量名或请求头名称，右侧填写对应的值。值可以直接填写，也可以用 `{{ENV_VAR}}` 引用启动 iCode 前已设置的环境变量。`env` 中引用的变量缺失或为空时，服务器连接失败；`headers` 仅在 `resolve_header_templates` 为 `true` 时解析变量并应用这一规则。
+`env` 和 `headers` 都是键值映射：左侧填写变量名或请求头名称，右侧填写对应的值。值可以直接填写，也可以用 `{{ENV_VAR}}` 引用启动 iCode 前已设置的环境变量，或用 `{{!command}}` 使用命令输出的内容（参阅[通过命令获取 API 密钥](../guides/configuration/models.md#通过命令获取-api-密钥)）。`env` 中引用的变量缺失或为空，或者命令第一次就失败时，服务器连接失败；`headers` 仅在 `resolve_header_templates` 为 `true` 时解析占位符并应用这一规则。
 
 | 字段 | 类型 | 默认值 | 适用范围 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -176,7 +179,7 @@ tools:
 | `encoding` | 字符串或 `null` | `null` | STDIO | 服务器标准输入输出编码；通常留空。 |
 | `url` | 字符串 | 空 | HTTP | 以 `http://` 或 `https://` 开头的服务器 URL。 |
 | `headers` | 字符串对象 | `{}` | HTTP | HTTP 请求头。 |
-| `resolve_header_templates` | 布尔值 | `true` | HTTP | 是否解析请求头值中的 `{{ENV_VAR}}`。设为 `false` 时按字面发送。 |
+| `resolve_header_templates` | 布尔值 | `true` | HTTP | 是否解析请求头值中的 `{{ENV_VAR}}` 和 `{{!command}}`。设为 `false` 时按字面发送。 |
 | `verify_ssl` | 布尔值 | `true` | HTTP | 是否验证 HTTPS 证书。关闭会降低连接安全性。 |
 | `bypass_proxy` | 布尔值 | `false` | HTTP | 是否绕过环境变量配置的 HTTP/HTTPS 代理，直接连接服务器。 |
 | `terminate_on_close` | 布尔值或 `null` | `null` | HTTP | 关闭连接时是否请求终止远程会话；`null` 使用默认值 `true`。 |
@@ -273,7 +276,7 @@ tools:
 
 | 字段 | 适用于 | 说明 |
 | --- | --- | --- |
-| `type` | 全部 | 必填。无需密钥的服务为 `exa_mcp`、`bing_html` 或 `duckduckgo_html`；需要密钥的搜索 API 为 `tavily`、`brave` 或 `exa`；自己的端点为 `custom_http`。 |
+| `type` | 全部 | 必填。无需密钥的服务为 `exa_mcp`、`bing_html`、`duckduckgo_html` 或 `keenable`；需要密钥的搜索 API 为 `tavily`、`brave` 或 `exa`；自己的端点为 `custom_http`。 |
 | `api_key_env` | `tavily`、`brave`、`exa` | 必填。保存 API 密钥的环境变量名。这些类型不接受其他字段。 |
 | `preset` | `custom_http` | `searxng` 或 `serpapi`，为对应服务自动填写请求和响应映射；`serpapi` 还会设置 `endpoint` 和 `auth`。自己填写的字段优先。 |
 | `endpoint` | `custom_http` | 搜索端点 URL。还需在用户设置 `tools.web_search.custom_endpoints` 中授权该端点及其读取的每个环境变量。 |
@@ -283,7 +286,7 @@ tools:
 | `request` | `custom_http` | `query_params`，以及 `POST` 时的 `json`。写成 `{$input: query}`、`{$input: limit}`、`{$input: allowed_domains}` 或 `{$input: blocked_domains}` 的值会替换为对应的搜索参数，`{$env: NAME}` 会替换为环境变量。 |
 | `response` | `custom_http` | 指向响应内容的 JSON Pointer：`results_pointer` 和 `url_pointer`（未使用预设时必填），以及可选的 `title_pointer` 和 `snippet_pointer`。 |
 
-`exa_mcp`、`bing_html` 和 `duckduckgo_html` 只接受 `type` 字段。
+`exa_mcp`、`bing_html`、`duckduckgo_html` 和 `keenable` 只接受 `type` 字段。
 
 DeepSeek Search API 的完整 `custom_http` 示例见[配置网络工具](../guides/configuration/web-tools.md#deepseek-search-api)。DeepSeek 服务端 `web_search` 的支持模型和计费以 DeepSeek 官方文档为准。
 
@@ -307,6 +310,15 @@ tools:
 | `timeout_seconds` | 整数 | 用户设置 `tools.web_fetch.timeout_seconds`（`60`） | 整个网页读取调用的截止时间（秒），范围 `1`–`120`。 |
 
 网络访问（代理、来源列表和自定义端点授权）只能在用户设置中配置，不能写在智能体配置文件中。参阅设置文件参考中的[网络工具](./settings.md#网络工具)。
+
+## extensions
+
+```yaml
+extensions:
+  - tracker
+```
+
+智能体按顺序加载的 [Python 扩展](../guides/extensions/python-extensions.md) ID。未安装的扩展仍保留在列表中；智能体启动时不包含它，并显示警告。
 
 ## approval
 
@@ -387,7 +399,11 @@ Skill 脚本是例外：`run_skill_script` 默认需要审批。如需修改该�
 
 网络工具也是例外：`web_search` 和 `web_fetch` 类别的工具默认需要审批，即使 `default` 为 `auto`。该规则在 `overrides` 中的规则之后、`default` 之前生效。如需修改，在 `overrides` 中显式配置该类别或工具名称的审批级别，例如 `web_search: auto`。
 
+[Python 扩展](../guides/extensions/python-extensions.md)中的工具遵循同样的规则，作者标记为可以直接运行的工具除外。如需修改，为扩展的类别或其中某个工具配置审批级别，例如 `extension.tracker: auto`。
+
 ## skills
+
+下表中的字段留空（例如把列表项注释掉后只剩键名）等同于省略该字段，使用默认值。列表字段必须写成列表；写成单个值（如 `paths: ./team-skills`）会导致整个配置被跳过。
 
 ```yaml
 skills:
@@ -518,7 +534,7 @@ TUI 的“智能体配置”窗口保存时会检查并发数和 `tool_name` 格
 
 顶层出现 `acp` 时，该配置会成为外部 ACP 智能体，并被强制设为仅用作子智能体。任务指令、模型和工具由外部进程决定。
 
-外部 ACP 智能体不使用当前配置中的 `instructions`、`model.profile_id`、`tools`、`skills`、`memory`、`compaction`、`approval` 和 `sub_agents`。这些设置不会影响外部智能体的行为。
+外部 ACP 智能体不使用当前配置中的 `instructions`、`model.profile_id`、`tools`、`extensions`、`skills`、`memory`、`compaction`、`approval` 和 `sub_agents`。这些设置不会影响外部智能体的行为。
 
 ```yaml
 name: ExternalReviewer
@@ -549,4 +565,4 @@ acp:
 
 **`allow_external_cwd` 的目录范围**：如果 iCode 会话由 ACP 客户端创建，且客户端提供了附加工作目录，那么即使 `allow_external_cwd` 为 `false`，外部智能体也可以在这些目录及其子目录中运行。
 
-`command`、`args`、`env` 的值和 `cwd` 可以使用 `{{ENV_VAR}}` 引用 iCode 进程的环境变量。缺失或为空的变量会导致启动失败。连接测试、工作目录安全边界和配置项应用方式参阅[配置外部 ACP 智能体](../guides/extensions/external-acp-agents.md)。
+`command`、`args`、`env` 的值和 `cwd` 可以使用 `{{ENV_VAR}}` 引用 iCode 进程的环境变量。缺失或为空的变量会导致启动失败。`args` 和 `env` 的值还可以使用 `{{!command}}`，每次启动外部智能体时都会运行命令；`command` 和 `cwd` 不能使用。连接测试、工作目录安全边界和配置项应用方式参阅[配置外部 ACP 智能体](../guides/extensions/external-acp-agents.md)。

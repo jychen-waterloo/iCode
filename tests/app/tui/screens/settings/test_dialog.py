@@ -17,6 +17,7 @@ import chrys.app.tui.screens.settings.dialog as dialog_module
 from chrys.app.tui.i18n import LocaleController
 from chrys.app.tui.screens.settings import GENERAL_TAB_ID, NOTIFICATIONS_TAB_ID, SettingsDialog
 from chrys.app.tui.screens.settings.dialog import pane_id
+from chrys.app.tui.screens.settings.layout import tab_by_id
 from chrys.app.tui.screens.settings.panes.notifications import NotificationsPane
 from chrys.app.tui.screens.settings.rows import SettingRow
 from chrys.foundation.config.settings import Settings
@@ -82,7 +83,7 @@ async def test_mounting_the_dialog_writes_nothing_and_focuses_a_control() -> Non
         assert ports.notification_ports.saved == []
         assert isinstance(dialog.focused, Select)
         rows = dialog.rows()
-        assert len(rows) == ROW_COUNT == 38
+        assert len(rows) == ROW_COUNT == 41
         assert all(row.spec.key != "trajectory.verify_commands" for row in rows)
         assert dialog.query_one(TabbedContent).active == pane_id(GENERAL_TAB_ID)
 
@@ -290,7 +291,7 @@ async def test_approval_mode_row_hides_bypass_and_confirms_only_the_move_to_auto
     ports = StubPorts()
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
-        dialog = await _open(pilot, ports, initial_tab="security")
+        dialog = await _open(pilot, ports, initial_tab="safety")
         await pilot.pause()
         rows = _rows(dialog)
         select = rows["approval.default_mode"].query_one(Select)
@@ -314,7 +315,7 @@ async def test_dangerous_bool_confirms_when_enabling_and_reverts_when_declined()
     ports.confirm_answer = False
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
-        dialog = await _open(pilot, ports, initial_tab="security")
+        dialog = await _open(pilot, ports, initial_tab="safety")
         await pilot.pause()
         rows = _rows(dialog)
         checkbox = rows["log.raw_http_capture"].query_one(Checkbox)
@@ -363,12 +364,20 @@ async def test_dangerous_bool_confirms_when_enabling_and_reverts_when_declined()
         ),
         (
             "approval.timeout_seconds",
-            "security",
+            "safety",
             [
                 ("600", 600, None, "600"),
                 ("45", 45, None, "45"),
                 ("0", 0, None, "0"),
                 ("abc", None, "Expected an integer.", "abc"),
+            ],
+        ),
+        (
+            "llm.credential_command.ttl_seconds",
+            "safety",
+            [
+                ("7200", 7200, None, "7200"),
+                ("30", 60, None, "60"),
             ],
         ),
         (
@@ -388,7 +397,7 @@ async def test_input_rows_commit_through_the_field_coercer(
     tab: str,
     edits: list[tuple[str, int | None, str | None, str]],
 ) -> None:
-    ports = StubPorts(Settings(max_transient_retries=9, buddy_model="old-model", ask_user_timeout_seconds=45))
+    ports = StubPorts(Settings(max_transient_retries=9, buddy_model_profile="old-model", ask_user_timeout_seconds=45))
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
         dialog = await _open(pilot, ports, initial_tab=tab)
@@ -447,7 +456,7 @@ async def test_badges_and_status_follow_apply_kind_and_pending_state() -> None:
     ports = StubPorts()
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
-        dialog = await _open(pilot, ports, initial_tab="security")
+        dialog = await _open(pilot, ports, initial_tab="safety")
         await pilot.pause()
         rows = _rows(dialog)
         container = dialog.query_one("#settings-container", VerticalGroup)
@@ -496,20 +505,28 @@ async def test_reproject_repaints_values_without_writing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_buddy_model_is_picked_from_the_registered_model_ids() -> None:
+async def test_every_model_role_is_picked_from_the_same_model_profiles() -> None:
     ports = StubPorts()
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
         dialog = await _open(pilot, ports, initial_tab="models")
         await pilot.pause()
-        select = _rows(dialog)["model.role.buddy_model_id"].query_one(Select)
+        rows = _rows(dialog)
+        roles = ("model.role.session_title", "model.role.approval_judge", "model.role.buddy")
 
-        # Blank stores "" and reads "Use active model"; the options are bare model ids.
-        assert select.value == ""
-        assert [str(prompt) for prompt, _value in select._options] == ["Use active model", "vendor/one", "vendor/two"]
-        select.value = "vendor/two"
+        # Blank stores "" and reads "Use active model"; every role then offers the model profiles by name.
+        for key in roles:
+            select = rows[key].query_one(Select)
+            assert select.value == ""
+            assert [(str(prompt), value) for prompt, value in select._options] == [
+                ("Use active model", ""),
+                ("Model One", "model-one"),
+                ("Model Two", "model-two"),
+            ], key
+        select = rows["model.role.buddy"].query_one(Select)
+        select.value = "model-two"
         await pilot.pause()
-        assert ports.persisted == [{"model.role.buddy_model_id": "vendor/two"}]
+        assert ports.persisted == [{"model.role.buddy": "model-two"}]
 
         # A blank retry cap shows the frontend default it falls back to.
         retries = _rows(dialog)["llm.retry.max_transient"].query_one(Input)
@@ -659,7 +676,7 @@ async def test_cli_and_sealed_provenance_stay_editable_with_a_badge() -> None:
         assert _badges(agent) == "this session"
         assert _hint(agent).startswith("Set for this session by a command-line option")
 
-        dialog.query_one(TabbedContent).active = pane_id("security")
+        dialog.query_one(TabbedContent).active = pane_id("safety")
         await pilot.pause()
         raw = _rows(dialog)["log.raw_http_capture"]
         assert raw.query_one(Checkbox).disabled is False
@@ -677,7 +694,7 @@ async def test_an_env_pinned_bypass_shows_as_the_current_choice_without_writing(
     )
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
-        dialog = await _open(pilot, ports, initial_tab="security")
+        dialog = await _open(pilot, ports, initial_tab="safety")
         await pilot.pause()
         select = _rows(dialog)["approval.default_mode"].query_one(Select)
 
@@ -707,7 +724,7 @@ async def test_a_dormant_project_file_swaps_the_project_gate_hint_until_the_gate
     )
     app = Host()
     async with app.run_test(size=(100, 40)) as pilot:
-        dialog = await _open(pilot, ports, initial_tab="security")
+        dialog = await _open(pilot, ports, initial_tab="safety")
         await pilot.pause()
         row = _rows(dialog)["project.config_enabled"]
 
@@ -847,3 +864,13 @@ async def test_a_select_shows_its_placeholder_when_the_projected_value_is_blank(
         await pilot.pause()
         assert _label("agent.default_profile") == "Chat"
         assert ports.persisted == [] and ports.live == []
+
+
+def test_the_credential_refresh_interval_moved_from_the_models_tab_to_the_safety_tab() -> None:
+    def keys(tab_id: str) -> set[str]:
+        tab = tab_by_id(tab_id)
+        assert tab is not None
+        return {row.key for section in tab.sections for row in section.rows}
+
+    assert "llm.credential_command.ttl_seconds" in keys("safety")
+    assert "llm.credential_command.ttl_seconds" not in keys("models")

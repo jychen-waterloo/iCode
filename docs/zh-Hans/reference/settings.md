@@ -13,9 +13,9 @@
 
 iCode 仅在当前会话的工作目录下查找 `.chrys/settings.yaml`，不向父目录或子目录查找。
 
-设置文件和 `.env` 文件建议使用 UTF-8。iCode 也会自动检测 GBK/GB18030 等常见旧编码，以及带 BOM 的 UTF-16/UTF-32。iCode 写入这些文件时一律使用 UTF-8：一是你保存设置时，二是启动时把旧版本留下的设置（例如 `.env` 中的 `CHRYS_*` 行）移入 `settings.yaml` 时。
+设置文件建议使用 UTF-8。iCode 也会自动检测 GBK/GB18030 等常见旧编码，以及带 BOM 的 UTF-16/UTF-32。保存设置时一律使用 UTF-8。
 
-文件中存在无法按检测到的编码解码的字节时，iCode 会将其视为无效文件，不会用 `�` 替换。设置文件沿用无效文件的恢复规则；无法解码的 `.env` 文件会在加载时跳过，尝试更新时会报错并保留原文件。
+文件中存在无法按检测到的编码解码的字节时，iCode 会将其视为无效文件，不会用 `�` 替换。设置文件沿用无效文件的恢复规则。
 
 文件使用 YAML 格式。键名以点分隔表示嵌套层级，例如 `llm.retry.max_transient` 在文件中写为：
 
@@ -25,7 +25,11 @@ llm:
     max_transient: 3
 ```
 
-手动编辑设置文件后，保存并重新启动 iCode 使修改生效。
+手动编辑设置文件后请保存，在 TUI 空闲时执行 `/reload`。主题、语言、通知和 verify commands 会立即更新。编辑器键位在下次打开消息编辑器时生效。聊天显示设置，以及自动审批期间是否延后显示审批窗口，在下次使用时读取。默认智能体和默认审批模式在下次启动时生效。如果之前在设置面板、主题列表、语言列表或消息编辑器中选过某项，且该选择已保存，手改的值也会取代它。未能保存的选择在本次会话中继续有效。如果文件中的主题不在主题列表里，界面保持当前主题；当前主题的文件已删除时改用默认主题。文件内容不会被改写。摘要会列出冲突的设置和需要重启的改动。设置文档损坏时命令中止并保留原文，请先修正文件再保存其他设置。普通读取可使用上次有效文档或备份；删除设置文件则移除这一层。
+
+命令同时扫描智能体和模型目录，新建模型文件后可在同一次刷新中选用它。已有配置文件损坏时，iCode 保留上次成功读取的定义并提示文件名。手改智能体名称后，iCode 在新配置构建成功后将文件移到新名称对应的路径，同时补齐缺失的智能体 ID，并在适用时移除对已退役 Plan 智能体的引用。如果当前使用内置智能体，新增或删除它的同名覆盖文件后，`/reload` 会继续使用该智能体，即使覆盖文件有自己的 ID。删除当前使用的自定义智能体后，会选择可用的启动智能体。删除所选模型后会改用其他可用模型；如没有可用模型，当前会话仍可用原模型继续。文件整理失败时会列出已经改动的文件，修正后可以重试。
+
+这次刷新还会重新读取[钩子](../guides/extensions/hooks.md#用-reload-应用修改)，并[重新连接 MCP 服务器](../guides/extensions/mcp.md#用-reload-重新连接)。
 
 ## 设置键
 
@@ -39,8 +43,9 @@ llm:
 | `ui.locale` | `CHRYS_LOCALE` | `system` | 字符串；`system` 跟随系统，也可设为 `en` 或 `zh-Hans`。不支持的语言使用英语；不改变模型回复语言 |
 | `ui.editor.keymap` | `CHRYS_EDITOR_KEYMAP` | `standard` | 字符串；`standard`、`emacs`、`vim`，选择输入编辑器的按键模式 |
 | `ui.chat.tool_groups_expanded` | 无 | `false` | 布尔值；新出现的工具组是否默认展开详情 |
-| `ui.chat.show_thinking` | 无 | `false` | 布尔值；TUI 对话中新的可读思考在模型写出时是否在回复上方展开；为 `false` 时只显示一行，滚动显示最新内容。无论开关，模型继续下一步后思考都会折叠。服务只以加密形式返回的思考不会显示 |
+| `ui.chat.show_thinking` | 无 | `false` | 布尔值；TUI 是否在回复上方展开新的可读思考。为 `false` 时，折叠行显示这段思考的估算 token 数，收到足够的文本后也会显示近期速度。无论开关，模型继续下一步后思考都会折叠。服务只以加密形式返回的思考不会显示 |
 | `ui.chat.fold_finished_turns` | 无 | `true` | 布尔值；成功回复后自动折叠中间执行过程。适用于之后完成的轮次及之后打开的会话，已有过程块保持当前状态。用户消息和最终回复始终可见 |
+| `ui.chat.image_graphics` | 无 | `true` | 布尔值；启动时询问终端类型，并在 Ghostty、kitty、iTerm2 3.7.5 及以上版本、WezTerm、开启了终端图片的 VS Code 和 Windows Terminal 1.22 及以上版本中，用终端自身的图形能力全彩显示对话中的图片；为 `false` 时不询问终端，图片与在其他终端中一样以彩色色块绘制。启动时读取 |
 | `ui.chat.file_snapshot_inline_chars` | `CHRYS_TUI_FILE_SNAPSHOT_INLINE_CHARS` | `131072` | 整数；控制文件编辑卡片直接载入的改动前后内容上限，按两者字节数合计判断。不超过上限时随卡片载入，标题显示具体的增删行数；超过上限且有可用快照引用时，展开差异才读取，标题不显示具体行数。`0` 或负数将上限设为零；没有可用快照引用时仍可能保留内联内容。此设置只控制卡片的内容载入方式；是否备份文件内容由 `mutations.snapshot.max_file_mb` 和 `mutations.snapshot.skip_binary` 决定 |
 | `history.prompt.enabled` | `CHRYS_HISTORY_DISABLE` | `true` | 布尔值；跨会话保存和读取输入历史，关闭不会删除已有记录。环境变量含义相反：只有精确的 `1` 禁用历史，其他值不禁用 |
 | `app.update_check` | `CHRYS_UPDATE_CHECK` | `true` | 布尔值；TUI 每天启动时最多查询一次 iCode 的最新版本，有新版本时在欢迎页显示新版本号和升级 iCode 的命令。查询请求不包含你的任何个人信息或数据。`icode run`、`icode acp` 和 `icode serve` 不会查询 |
@@ -48,7 +53,7 @@ llm:
 
 ### 智能体、模型与请求
 
-模型用途键填写已有模型配置的 ID 或唯一名称；Buddy 伙伴不选择模型配置，其键填写模型服务端的模型名称（`model_id`）。
+模型用途键填写已有模型配置的 ID 或唯一名称。`model.role.buddy` 取代早期版本中填写模型名称的 `model.role.buddy_model_id`：iCode 启动时，会把已保存的模型名称替换为使用该模型的模型配置；若没有模型配置使用该模型，或有多个模型配置使用，则删除旧值，Buddy 伙伴使用当前模型。iCode 不再读取 `CHRYS_PET_MODEL`，请改用 `CHRYS_MODEL_PROFILE_BUDDY`，填写模型配置的 ID 或名称。
 
 | YAML 键 | 环境变量 | 默认值 | 类型、取值与效果 |
 | --- | --- | --- | --- |
@@ -56,8 +61,9 @@ llm:
 | `model.profile.active` | `CHRYS_MODEL_PROFILE` | 未指定 | 字符串；选择已有模型配置，作为智能体未指定有效 `model.profile_id` 时的后备模型。显式 `--model` 优先于此键，但仍作为后备模型；ACP 会话中显式切换模型则优先于智能体指定的模型 |
 | `model.role.approval_judge` | `CHRYS_MODEL_PROFILE_APPROVAL_JUDGE` | 未指定 | 字符串；自动审批使用的模型配置，未指定时使用当前模型 |
 | `model.role.session_title` | `CHRYS_MODEL_PROFILE_SESSION_TITLE` | 未指定 | 字符串；自动生成会话标题使用的模型配置，未指定时使用当前模型 |
-| `model.role.buddy_model_id` | `CHRYS_PET_MODEL` | 未指定 | 字符串；Buddy 伙伴使用的模型，沿用当前模型配置的连接；未指定时使用当前模型 |
+| `model.role.buddy` | `CHRYS_MODEL_PROFILE_BUDDY` | 未指定 | 字符串；Buddy 伙伴使用的模型配置，使用该配置自己的提供商、地址和模型；未指定时使用当前模型 |
 | `llm.retry.max_transient` | `CHRYS_MAX_TRANSIENT_RETRIES` | `null` | 整数或 `null`；`null` 使用当前启动入口的默认次数：TUI（含 `icode serve`）和 `icode acp` 为 `10` 次，`icode run` 和 `icode workflow run` 为 `18` 次。每次重试前的等待逐次变长，最长 10 分钟。`0` 禁用瞬时错误自动重试，负数无效，上限 `50` |
+| `llm.credential_command.ttl_seconds` | `CHRYS_CREDENTIAL_COMMAND_TTL_SECONDS` | `3600` | 整数；`{{!command}}` 占位符得到的值可以使用多少秒，之后下一次请求前重新运行命令。最小 `60`。服务拒绝该值时会立即更换。重启后生效。参阅[通过命令获取 API 密钥](../guides/configuration/models.md#通过命令获取-api-密钥) |
 
 瞬时错误重试用于临时网络故障、请求超时、限流等可恢复错误。提高次数也会增加最终失败前的等待时间和请求次数；该数字不等于整个任务的模型请求总数。
 
@@ -68,7 +74,7 @@ llm:
 | YAML 键 | 环境变量 | 默认值 | 类型、取值与效果 |
 | --- | --- | --- | --- |
 | `approval.default_mode` | `CHRYS_DEFAULT_APPROVAL_MODE` | `manual` | 字符串；`manual` 手动审批、`auto` 自动审批、`bypass` 跳过审批。设置默认模式不会切换当前会话 |
-| `approval.auto_review` | `CHRYS_APPROVAL_AUTO_REVIEW` | `direct` | `direct` 为“直接审查”；`formal` 为“逐项风险检查”，发现删除文件、发布代码等风险时会请你确认。用法见[选择自动审查方式](../guides/configuration/approval.md#选择自动审查方式)。只在 `auto` 模式下生效。在设置窗口中修改后，关闭窗口即可生效；手动编辑文件后可重启 iCode 生效。请写在用户设置中，项目不能覆盖；无效值使用 `direct` |
+| `approval.auto_review` | `CHRYS_APPROVAL_AUTO_REVIEW` | `direct` | `direct` 为“直接审查”；`formal` 为“逐项风险检查”，发现删除文件、发布代码等风险时会请你确认。用法见[选择自动审查方式](../guides/configuration/approval.md#选择自动审查方式)。只在 `auto` 模式下生效。在设置窗口中修改后，关闭窗口即可生效；手动编辑文件后可执行 `/reload` 生效。请写在用户设置中，项目不能覆盖；无效值使用 `direct` |
 | `approval.timeout_seconds` | `CHRYS_APPROVAL_TIMEOUT_SECONDS` | `0` | 整数；TUI 和 ACP 等待人工审批的秒数，`0` 表示不超时，正数表示等待时限，负数调整为 `0`。超时后拒绝本次工具调用。重启 iCode 后生效 |
 | `ui.approval.defer_while_judging` | 无 | `true` | 布尔值；自动模式下，TUI 是否只在审批裁判模型标记调用或评估失败时才弹出审批对话框。`false` 表示评估期间立即弹出。ACP 服务器和 `icode run` 不受影响 |
 | `project.config_enabled` | 无 | `false` | 布尔值；是否加载各工作目录的项目设置，必须在用户设置中启用 |
@@ -96,6 +102,7 @@ llm:
 | YAML 键 | 环境变量 | 默认值 | 类型、取值与效果 |
 | --- | --- | --- | --- |
 | `tools.search.respect_gitignore` | 无 | `true` | 布尔值；grep 和 glob 搜索时应用 `.gitignore` 规则。设为 `false` 时仍会跳过隐藏路径，`.ignore` 等其他忽略文件也仍然生效 |
+| `tools.image.send_limit_kb` | `CHRYS_IMAGE_SEND_LIMIT_KB` | `256` | 整数，`32` 到 `3072`，超出范围时取最近的边界值；发给模型的一张图片的文件最多占用的 KB 数（在请求中以 base64 发送，约多三分之一）。附加、查看或由 ACP 客户端发送的图片超过它时压缩为不超过它的 JPEG；每轮和每次重试开始时，会话中之前发送的、超过它的图片也会压缩 |
 | `tools.ask_user.inline` | `CHRYS_ASK_USER_INLINE` | `false` | 布尔值；TUI 中将智能体提问显示在对话中，而不是弹出窗口 |
 | `tools.ask_user.timeout_seconds` | `CHRYS_ASK_USER_TIMEOUT_SECONDS` | `900` | 整数或 `null`；等待回答的秒数，超时后向智能体返回超时结果；`0`、负数或用户 YAML 的 `null` 表示无限等待 |
 | `tools.result.ceiling_tokens` | `CHRYS_TOOL_RESULT_CEILING_TOKENS` | `64000` | 整数；单条工具结果交给模型前的最终长度上限，单位 token。`0` 关闭此限制；正数最小 `2000`，负数无效 |
@@ -181,14 +188,11 @@ llm:
 | --- | --- |
 | 1 | 当前会话中的明确选择、命令行参数或入口固定行为 |
 | 2 | 启动进程时已有的环境变量 |
-| 3 | 旧版用户 `.env` 中尚未迁移的设置（macOS / Linux：`~/.chrys/.env`；Windows：`%APPDATA%\chrys\.env`） |
-| 4 | 已启用且允许应用的项目设置 |
-| 5 | 用户设置 |
-| 6 | 内置默认值 |
+| 3 | 已启用且允许应用的项目设置 |
+| 4 | 用户设置 |
+| 5 | 内置默认值 |
 
-启动时，iCode 会尝试将旧版用户 `.env` 中的 iCode 设置迁入用户 `settings.yaml`，并清理已迁移的设置行。合并时 `settings.yaml` 中已有的同名键优先保留，不会被覆盖；尚未完成迁移的设置行仍按上表第 3 级来源生效。迁移失败时会提示，并在下次启动时重试。模型服务的 API 密钥等环境变量保留在 `.env` 中。
-
-工作目录 `.env` 中的 iCode 设置不生效。项目设置应写入 `.chrys/settings.yaml`。
+iCode 不读取或迁移工作目录和用户配置目录中的 `.env` 文件。如果仍需使用原先由这些文件提供的环境变量，请在用于启动 iCode 的环境中设置它们，然后重启 iCode。这包括服务提供方的 API 密钥、代理变量（`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`）、OpenTelemetry 变量（`OTEL_*`），以及占位符引用的变量，例如 MCP 请求头中的 `{{MCP_API_TOKEN}}` 和模型 `extra_headers` 中的 `{{MY_GATEWAY_TOKEN}}`。个人设置应写入用户 `settings.yaml`，项目设置应写入 `.chrys/settings.yaml`。
 
 ## 值的写法与无效值
 
@@ -202,7 +206,7 @@ llm:
 
 ## 项目级设置
 
-项目设置默认不加载。先在用户 `settings.yaml` 中启用，或在 TUI 的“设置 → 安全”中打开“加载项目设置”：
+项目设置默认不加载。先在用户 `settings.yaml` 中启用，或在 TUI 的“设置 → 安全管控”中打开“加载项目设置”：
 
 ```yaml
 project:
@@ -235,7 +239,7 @@ llm:
     max_transient: 3
 ```
 
-启用项目设置并重新启动后，若用户未设置重试次数，则使用项目的 `3` 次；若用户 YAML 已设为 `1`，项目中的 `3` 会被拒绝，仍使用 `1`。启动环境中的有效值始终优先。
+启用项目设置并刷新后，若用户未设置重试次数，则使用项目的 `3` 次；若用户 YAML 已设为 `1`，项目中的 `3` 会被拒绝，仍使用 `1`。启动环境中的有效值始终优先。
 
 iCode 会提示并忽略项目中不允许的键、超出覆盖限制的值和未知键，继续应用其他有效设置。
 
@@ -250,7 +254,7 @@ iCode 会提示并忽略项目中不允许的键、超出覆盖限制的值和�
 
 ## 设置未生效时
 
-1. 确认设置文件的位置正确，保存后已重新启动 iCode。
+1. 确认设置文件的位置正确。保存后在 TUI 中执行 `/reload`；提示下次启动或需要重启的设置请重启 iCode。
 2. 检查是否存在更高优先级的来源；删除 YAML 中的键不会清除其他来源的值。
 3. 对项目设置，确认用户已启用加载，且键名和覆盖方向符合限制。
 4. 查看 iCode 启动时报告的消息：无效值或未知键的处理规则见[值的写法与无效值](#值的写法与无效值)；目录相关提示对照[文件位置与格式](#文件位置与格式)检查。

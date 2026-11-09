@@ -577,7 +577,7 @@ def test_on_retry_attempt_calls_prepare_retry_before_add_retry() -> None:
         async def prepare_retry(self) -> None:
             call_log.append("prepare_retry")
 
-        async def add_retry(self, *_args) -> None:
+        async def add_retry(self, *_args, deadline: float | None = None, wait_id: str = "") -> None:
             call_log.append("add_retry")
 
     class _FakeStatusBar:
@@ -634,7 +634,7 @@ def test_on_retry_attempt_compaction_scope_uses_detail_without_parsing_message()
         async def prepare_retry(self) -> None:
             call_log.append("prepare_retry")
 
-        async def add_retry(self, *_args) -> None:
+        async def add_retry(self, *_args, deadline: float | None = None, wait_id: str = "") -> None:
             call_log.append("add_retry")
 
         def show_compaction_retry(self, message: str, attempt: int, max_attempts: int, delay_seconds: int) -> None:
@@ -690,7 +690,7 @@ def test_retry_attempt_display_message_localizes_banner_and_keeps_english_bytes(
             async def prepare_retry(self) -> None:
                 pass
 
-            async def add_retry(self, message: str, *_args) -> None:
+            async def add_retry(self, message: str, *_args, deadline: float | None = None, wait_id: str = "") -> None:
                 banners.append(message)
 
             def show_compaction_retry(self, message: str, *_args) -> None:
@@ -759,7 +759,7 @@ def test_on_retry_attempt_skipped_when_not_running() -> None:
         async def prepare_retry(self) -> None:
             call_log.append("prepare_retry")
 
-        async def add_retry(self, *_args) -> None:
+        async def add_retry(self, *_args, deadline: float | None = None, wait_id: str = "") -> None:
             call_log.append("add_retry")
 
     def _query_one(_cls):
@@ -1017,6 +1017,50 @@ def test_final_agent_message_keeps_gate_and_prestamps_terminal_absorb(
     assert gc_messages[0].terminal_boundary is True
     assert gc_messages[0].time == 10.0
     assert input_events[0].time == 20.0
+
+
+def test_final_agent_message_tells_when_its_turn_began() -> None:
+    """The answer is timed from when the user sent the message or pressed Continue or Retry, as the backend keeps it."""
+    began = datetime(2026, 8, 19, 1, 58, tzinfo=UTC)
+    finished = began + timedelta(minutes=6)
+    rendered: list[dict[str, object]] = []
+
+    class _FakeStatusBar:
+        def flash_completed(self) -> None:
+            pass
+
+    class _FakeChatPanel:
+        async def add_agent_message(
+            self,
+            text: str,
+            *,
+            structured_output_completed: bool = False,
+            created_at: datetime | None = None,
+            turn_started_at: datetime | None = None,
+        ) -> None:
+            rendered.append({"text": text, "created_at": created_at, "turn_started_at": turn_started_at})
+
+    status = _FakeStatusBar()
+    panel = _FakeChatPanel()
+    screen = SimpleNamespace(
+        _state=MainScreenState(run=RunState(agent_running=True, started_at=began)),
+        _gc_messages=[],
+        _session_title=fake_session_title(),
+        _set_agent_running=lambda _value: None,
+        query_one=lambda cls: status if cls.__name__ == "StatusBar" else panel,
+        _debug=lambda *_args: None,
+    )
+    handler = make_backend_handler(screen)
+
+    asyncio.run(
+        handler.on_agent_message(
+            InvocationMessage(
+                text="done", is_final=True, origin=InvocationOrigin("turn", "", "turn-test", None), timestamp=finished
+            )
+        )
+    )
+
+    assert rendered == [{"text": "done", "created_at": finished, "turn_started_at": began}]
 
 
 def test_final_agent_message_render_failure_releases_turn_without_absorb() -> None:

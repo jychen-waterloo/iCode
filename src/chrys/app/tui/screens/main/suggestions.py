@@ -5,20 +5,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 from rich.text import Text
 from textual.content import Content
+from textual.worker import WorkerCancelled
 
 from chrys.app.tui.i18n import render_str
 from chrys.app.tui.screens.main.buddy_command import BuddyCommandController
 from chrys.app.tui.screens.main.commands import MainSlashCommandRegistry, SlashCommandActionPort
 from chrys.app.tui.screens.main.model_indicator import is_model_selection_locked
 from chrys.app.tui.screens.main.ports import BuddyCommandView, StartWorker, SuggestionPopupView
-from chrys.app.tui.screens.main.state import MainScreenServices, MainScreenState
+from chrys.app.tui.screens.main.state import MainScreenServices, MainScreenState, running_model
 from chrys.app.tui.support.gc_freeze import GcFreezeBlockReason
 from chrys.app.tui.support.prompt_history import DEFAULT_MAX_ENTRIES as _PROMPT_HISTORY_SEARCH_LIMIT
 from chrys.app.tui.support.prompt_search import (
@@ -30,15 +33,27 @@ from chrys.app.tui.support.prompt_search import (
 )
 from chrys.app.tui.widgets.chrome.commands import (
     SlashCommandDef,
+    completion_token_start,
     is_slash_command_candidate,
+    parse_slash_draft,
 )
+from chrys.app.tui.widgets.chrome.file_index import ProjectPathIndex, WorkspacePathIndex
+from chrys.app.tui.widgets.chrome.prompt_draft import ChatDraft, ShortcutIntent
 from chrys.app.tui.widgets.chrome.suggestion_list import SuggestionItem
 from chrys.foundation.i18n import MessageRef, msg
-from chrys.foundation.i18n.formatting import format_message, sanitize_legacy_scalar
+from chrys.foundation.i18n.formatting import format_message, sanitize_legacy_scalar, sanitize_terminal_block
 from chrys.foundation.platform import safe_getcwd
+from chrys.foundation.text.draft_references import labels_as_words, labels_from_words
 from chrys.service.profiles.models.schema import is_model_profile_selectable
+from chrys.service.prompt_shortcuts import (
+    PromptShortcut,
+    expand_template,
+    load_prompt_shortcuts,
+    prompt_shortcut_folders,
+    prompt_shortcut_sources,
+)
 
-_FILE_QUERY_DEBOUNCE_SECONDS = 0.04
+_FILE_QUERY_DEBOUNCE_SECONDS = 0.016
 _FILE_QUERY_LIMIT = 30
 # The list shows the best this many prompts; search covers every stored prompt.
 _PROMPT_HISTORY_DISPLAY_LIMIT = 100
@@ -51,6 +66,21 @@ _PROMPT_HISTORY_FALLBACK_CELLS = 80
 # The index outlives the list for an instant reopen only while the prompts hold
 # at most this many characters; it keeps about three copies of their text.
 _PROMPT_HISTORY_CACHE_MAX_CHARS = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class TypedName:
+    """What a typed ``/name arguments`` names (:meth:`SuggestionHandler.resolve_typed_name`).
+
+    ``none``: not a ``/name``, or no command, skill or shortcut by that name.
+    ``pending``: the shortcuts are still being read and the name is no
+    command or skill, so it may yet be a shortcut.
+    """
+
+    kind: Literal["none", "command", "skill", "shortcut", "pending"]
+    shortcut: PromptShortcut | None = None
+    arguments: str = ""
+
 
 _SUGGESTIONS_FILES_TITLE = msg("tui.suggestions.files_title", fallback="Files under {root}")
 _SUGGESTIONS_COMMANDS_TITLE = msg("tui.suggestions.commands_title", fallback="Commands")
@@ -78,6 +108,9 @@ _SUGGESTIONS_PROMPT_HISTORY_NO_MATCH = msg(
 )
 _SUGGESTIONS_SYSTEM_COMMANDS = msg("tui.suggestions.system_commands", fallback="System Commands")
 _SUGGESTIONS_LOADED_SKILLS = msg("tui.suggestions.loaded_skills", fallback="Loaded Skills")
+_SUGGESTIONS_PROMPT_SHORTCUTS = msg("tui.suggestions.prompt_shortcuts", fallback="Prompt Shortcuts")
+_PROMPT_HINT_ARGUMENT = msg("tui.prompt_shortcuts.hint.argument", fallback="argument {position}")
+_PROMPT_HINT_ARGUMENTS = msg("tui.prompt_shortcuts.hint.arguments", fallback="arguments")
 _SUGGESTIONS_SHADOWED = msg("tui.suggestions.shadowed", fallback="shadowed by /{name}")
 _SUGGESTIONS_BOUNDED_INDEX = msg(
     "tui.suggestions.bounded_index",
@@ -93,12 +126,15 @@ _COMMAND_UNAVAILABLE_RUNNING = msg(
     fallback="/{name} is not available while agent is running",
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from textual.worker import Worker
 
     from chrys.app.tui.i18n import LocaleController
-    from chrys.app.tui.widgets.chrome.file_index import ProjectPathIndex
-    from chrys.app.tui.widgets.chrome.file_scanner import ProjectPathScanResult, ProjectPathSuggestion
+    from chrys.app.tui.widgets.chrome.file_scanner import ProjectPathSuggestion
     from chrys.foundation.events.types import RuntimeSkillDetails
 
 
@@ -122,6 +158,13 @@ class SuggestionCallbacks:
     submit_user_text: Callable[[str], object]
     start_agent_profile_switch: Callable[[str], object]
     start_model_profile_switch: Callable[[str], object]
+
+
+def _prompt_row_value(shortcut: PromptShortcut) -> str:
+    """A shortcut row's value, as typed (``/name``): unique among rows, which a file's path is not
+    (a file under two listed folders loads under two names) and a bare name is not (it may be a
+    command's or skill's too)."""
+    return f"/{shortcut.name}"
 
 
 class SuggestionHandler:
@@ -148,16 +191,14 @@ class SuggestionHandler:
         self._callbacks = callbacks
         self._locale_controller = locale_controller
         self._suggestion_mode: str | None = None
-        self._file_cache: list[ProjectPathSuggestion] | None = None
-        self._file_cache_root: str | None = None
-        self._file_index: ProjectPathIndex | None = None
-        self._file_index_root: str | None = None
-        self._file_cache_generation = 0
+        self._file_index: WorkspacePathIndex | None = None
         self._file_query_revision = 0
         self._file_latest_query = ""
-        self._file_query_pending: tuple[str, int] | None = None
+        self._file_query_pending: tuple[str, int, bool] | None = None
+        # Set by a keystroke's query and cleared once file rows show: the rows after it reset the highlight.
+        self._file_query_resets_highlight = False
         self._file_query_worker: Worker[None] | None = None
-        self._file_warmup_requested_root: str | None = None
+        self._file_rescan_requested = False
         self._file_warmup_worker: Worker[None] | None = None
         self._prompt_history_revision = 0
         self._prompt_history_index: PromptSearchIndex | None = None
@@ -177,6 +218,14 @@ class SuggestionHandler:
         self._prompt_history_deferred_keys: list[tuple[str, str]] = []
         self._slash_commands: list[SlashCommandDef] = []
         self._active_command: SlashCommandDef | None = None
+        # Read off the event loop, refreshed whenever ``/`` opens the list; only
+        # ever used for the folders it was read from (``_shortcuts``).
+        self._prompt_shortcuts: list[PromptShortcut] = []
+        self._prompt_shortcuts_folders: dict[str, Any] | None = None
+        """The folders and switches ``_prompt_shortcuts`` was read under; None before the first read."""
+        self._prompt_shortcuts_loading: dict[str, Any] | None = None
+        """The folders and switches the read in flight is reading under; None when none is out."""
+        self._prompt_shortcuts_generation = 0
         self._buddy_command = BuddyCommandController(
             buddy_view,
             render_message=self._render_message,
@@ -553,11 +602,54 @@ class SuggestionHandler:
     # -------------------------------------------------------------- #
 
     def on_slash_triggered(self) -> None:
-        """Show slash command suggestions."""
-        disabled = self._disabled_commands()
-        items = self._command_suggestion_items(self._visible_slash_commands(), disabled)
+        """Show slash command suggestions, then reread prompt shortcuts in the background."""
+        self._show_suggestions("commands", self._all_command_items(), disabled=self._disabled_commands())
+        # A burst of keys can reach the text area before this trigger is handled.
+        # Filter the current draft even when its Changed messages preceded the popup.
+        text = self._view.input_value()
+        if text not in ("/", "\uff0f"):
+            self.on_text_changed(text)
+        self.refresh_prompt_shortcuts()
+
+    def on_slash_query_changed(self, text: str) -> None:
+        """Reopen the command list for a ``/name`` draft when the list would stay open for it.
+
+        Uses the same test that keeps an open list open, so a path or comment
+        (``/Users/me``) never makes the list flash open and shut per keystroke.
+        """
+        if self._suggestion_mode is not None or self._view.suggestions_active:
+            return
+        if (
+            text not in ("/", "\uff0f")
+            and not is_slash_command_candidate(text)
+            and not self._names_prompt_shortcut(text)
+        ):
+            return
+        # Opening filters by the live draft.
+        self.on_slash_triggered()
+
+    def _exact_command_value(self, query: str) -> str | None:
+        """The row a fully typed name would run: the one :meth:`resolve_typed_name` names.
+
+        The groups are listed in another order, so without this the first
+        row, possibly a same-named shortcut, would be the one Enter picks.
+        """
+        if not query:
+            return None
+        typed = self.resolve_typed_name(f"/{query}")
+        if typed.kind == "command":
+            command = self._command_for_token(query)
+            return command.name if command is not None else None
+        if typed.kind == "skill":
+            return query
+        return _prompt_row_value(typed.shortcut) if typed.shortcut is not None else None
+
+    def _all_command_items(self) -> list[SuggestionItem]:
+        """Every row the bare ``/`` list shows: system commands, prompt shortcuts, then skills."""
+        items = self._command_suggestion_items(self._visible_slash_commands(), self._disabled_commands())
+        items.extend(self._prompt_shortcut_suggestion_items(self._known_shortcuts()))
         items.extend(self._runtime_skill_suggestion_items())
-        self._show_suggestions("commands", items, disabled=disabled)
+        return items
 
     def _command_suggestion_items(
         self,
@@ -627,11 +719,202 @@ class SuggestionHandler:
                 return cmd
         return None
 
+    # -------------------------------------------------------------- #
+    # Prompt shortcuts
+    # -------------------------------------------------------------- #
+
+    def refresh_prompt_shortcuts(self) -> None:
+        """Reread prompt shortcut files off the event loop for the current workspace; the newest read wins."""
+        if not self._view.is_attached:
+            return
+        folders = self._prompt_shortcut_folders()
+        if folders == self._prompt_shortcuts_loading:
+            # A read under these folders is already out; it is fresh enough.
+            return
+        self._prompt_shortcuts_generation += 1
+        self._prompt_shortcuts_loading = folders
+        self._view.run_suggestion_worker(
+            self._load_prompt_shortcuts(
+                self._prompt_shortcuts_generation, folders, partial(load_prompt_shortcuts, **folders)
+            ),
+            name="prompt-shortcuts",
+            group="prompt-shortcuts",
+        )
+
+    def _shortcuts(self) -> list[PromptShortcut] | None:
+        """The shortcuts read for the current workspace; None while they are still being read.
+
+        A list read for another workspace is never shown or expanded: its
+        files may not apply here. A workspace change starts a new read; a
+        refresh for the same workspace keeps the list meanwhile. None ("not known yet") is not "none there":
+        a typed ``/name`` that may be a shortcut waits for it
+        (:meth:`resolve_typed_name`).
+        """
+        folders = self._prompt_shortcut_folders()
+        if folders == self._prompt_shortcuts_folders:
+            return self._prompt_shortcuts
+        if folders != self._prompt_shortcuts_loading:
+            self.refresh_prompt_shortcuts()
+        return None
+
+    def _known_shortcuts(self) -> list[PromptShortcut]:
+        """The shortcuts to show or match now: none while they are still being read."""
+        return self._shortcuts() or []
+
+    def resolve_typed_name(self, text: str) -> TypedName:
+        """What a typed ``/name arguments`` names: the one answer every way of sending or expanding acts on.
+
+        A typed name resolves to the first of: system command (or alias),
+        loaded skill, prompt shortcut (names compared case-insensitively, as
+        the loader dedupes them). Skills come before shortcuts because a skill
+        row only fills in ``/name`` and is resolved by name when sent; a
+        shortcut row expands its own file when chosen and never needs this.
+        While the shortcuts for the folders in force are still being read, a
+        name that is no command or skill is ``pending``: acted on now, a
+        shortcut would go to the model as plain text, unexpanded.
+        """
+        slash = parse_slash_draft(text.strip())
+        if slash is None or not slash.name:
+            return TypedName("none")
+        name, arguments = slash.name, slash.arguments
+        if self._command_for_token(name) is not None:
+            return TypedName("command")
+        if any(skill.name == name for skill in self._state.runtime.details.skill_details):
+            return TypedName("skill")
+        shortcuts = self._shortcuts()
+        if shortcuts is None:
+            return TypedName("pending")
+        key = name.casefold()
+        shortcut = next((c for c in shortcuts if c.name.casefold() == key), None)
+        return TypedName("none") if shortcut is None else TypedName("shortcut", shortcut, arguments)
+
+    def prompt_shortcut_sources_loader(self) -> Callable[[], list[tuple[Path, list[PromptShortcut]]]]:
+        """A blocking read of the shortcuts by source folder for the current workspace, as the / list reads them."""
+        return partial(prompt_shortcut_sources, **self._prompt_shortcut_folders())
+
+    def _prompt_shortcut_folders(self) -> dict[str, Any]:
+        """Where the loader reads shortcuts from for the current workspace."""
+        return prompt_shortcut_folders(self._current_file_root())
+
+    async def _load_prompt_shortcuts(
+        self, generation: int, folders: dict[str, Any], load: Callable[[], list[PromptShortcut]]
+    ) -> None:
+        try:
+            commands = await asyncio.to_thread(load)
+        except asyncio.CancelledError:
+            # A read that never lands is not one out: the next ask for these folders starts another.
+            if generation == self._prompt_shortcuts_generation:
+                self._prompt_shortcuts_loading = None
+            raise
+        except Exception:
+            # A worker error would exit the App; a broken shortcut directory must not.
+            logger.exception("Prompt shortcuts: loading failed")
+            # Read, and none found: a /name waiting on this read must not wait forever.
+            commands = []
+        if generation != self._prompt_shortcuts_generation:
+            return
+        self._prompt_shortcuts_loading = None
+        unchanged = folders == self._prompt_shortcuts_folders and commands == self._prompt_shortcuts
+        self._prompt_shortcuts = commands
+        self._prompt_shortcuts_folders = folders
+        if unchanged or not self._view.is_attached:
+            # Nothing to show, or no screen to show it on: a read can land
+            # while the screen is being torn down, its widgets already gone.
+            return
+        if self._suggestion_mode == "commands" and self._view.suggestions_active:
+            self.on_text_changed(self._view.input_value(), keep_selection=True)
+
+    def _prompt_shortcut_suggestion_items(self, commands: Sequence[PromptShortcut]) -> list[SuggestionItem]:
+        """Build prompt-shortcut rows.
+
+        A row expands its own file when chosen, whatever a system command or
+        skill of the same name does, so no row is ever disabled.
+        """
+        return [
+            SuggestionItem(
+                value=_prompt_row_value(command),
+                label=self._prompt_shortcut_label(command),
+                section=self._render_message(_SUGGESTIONS_PROMPT_SHORTCUTS.bind()),
+                kind="prompt",
+                marquee_start=len(f"/{command.name}  ") if command.description else None,
+            )
+            for command in commands
+        ]
+
+    @staticmethod
+    def _prompt_shortcut_label(command: PromptShortcut) -> Content:
+        """Build a literal-text label from user-authored shortcut metadata."""
+        label = Text.assemble(f"/{sanitize_legacy_scalar(command.name)}")
+        description = sanitize_legacy_scalar(command.description).strip()
+        if description:
+            # Second separator space styled dim — see _command_suggestion_items.
+            label.append(" ")
+            label.append(Text(" " + description, style="dim"))
+        return Content.from_rich_text(label)
+
+    def _prompt_shortcuts_matching(self, query: str) -> list[PromptShortcut]:
+        """Return shortcuts whose name matches *query*, best first; the loader keeps one per name."""
+        from chrys.app.tui.widgets.chrome.file_scanner import fuzzy_filter
+
+        by_name = {command.name: command for command in self._known_shortcuts()}
+        names = fuzzy_filter(query, list(by_name), max_results=20) if query else list(by_name)
+        return [by_name[name] for name in names]
+
+    def _names_prompt_shortcut(self, text: str) -> bool:
+        """Whether *text* is ``/`` plus part of a shortcut name a slash command could not be (``/git/x``, ``/周报``).
+
+        Paths and comments (``/Users/me``, ``// note``) match no shortcut, so the list still closes for them.
+        """
+        slash = parse_slash_draft(text)
+        return (
+            slash is not None and slash.bare and bool(slash.name) and bool(self._prompt_shortcuts_matching(slash.name))
+        )
+
+    def _prompt_shortcut_for_value(self, value: str) -> PromptShortcut | None:
+        """Return the shortcut a row stands for (:func:`_prompt_row_value`)."""
+        return next((c for c in self._known_shortcuts() if _prompt_row_value(c) == value), None)
+
+    def _expand_prompt_shortcut(self, command: PromptShortcut, arguments: str) -> None:
+        # The file's text reaches the terminal through the input bar: no escape or control codes, tabs kept.
+        # A label in the arguments is one argument, as it is one unit in the draft;
+        # the expansion keeps every offset, so its fields still line up.
+        expansion = expand_template(
+            sanitize_terminal_block(command.template),
+            labels_as_words(arguments, self._view.input_references()),
+            default_hint=self._default_prompt_hint,
+        )
+        owner = ShortcutIntent(command.name, command.agent, command.model, path=command.path)
+        self._view.expand_prompt_in_input(ChatDraft(labels_from_words(expansion.text), tuple(expansion.fields), owner))
+
+    def _default_prompt_hint(self, position: int | None) -> str:
+        if position is None:
+            return self._render_message(_PROMPT_HINT_ARGUMENTS.bind())
+        return self._render_message(_PROMPT_HINT_ARGUMENT.bind(position=position))
+
+    def expand_typed_name(self, typed: TypedName) -> bool:
+        """Expand *typed* into the draft when it names a prompt shortcut; returns whether it expanded."""
+        if typed.shortcut is None:
+            return False
+        self.dismiss_suggestions()
+        self._expand_prompt_shortcut(typed.shortcut, typed.arguments)
+        return True
+
     def on_file_triggered(self) -> None:
         """Show file search suggestions."""
         self._file_latest_query = ""
         self._invalidate_file_query_results()
-        self._show_suggestions_loading("files")
+        index = self._file_index_for(self._current_file_root())
+        snapshot = index.snapshot
+        if snapshot is None:
+            self._show_suggestions_loading("files")
+        else:
+            # The resident snapshot answers at once, even a stale one; the worker
+            # below rescans in the background and swaps the result in.
+            self._show_suggestions(
+                "files", self._file_suggestion_items(snapshot.head(limit=_FILE_QUERY_LIMIT), index=snapshot)
+            )
+            if index.current:
+                return
         self._callbacks.start_worker(self.show_file_suggestions_async)
 
     def on_agent_triggered(self) -> None:
@@ -705,10 +988,8 @@ class SuggestionHandler:
         )
 
     def _current_model_profile_id(self) -> str:
-        """Return the best-known current model-profile id for suggestion styling."""
-        if self._state.runtime.details_confirmed:
-            return self._state.runtime.details.model.profile_id
-        return self._services.active_model_profile_id
+        """Return the model the session runs, for suggestion styling."""
+        return running_model(self._state, self._services)
 
     def _get_model_items(self) -> tuple[list[SuggestionItem], set[str]]:
         """Build suggestion items and disabled set from selectable model profiles."""
@@ -766,15 +1047,65 @@ class SuggestionHandler:
         return any(match not in disabled for match in matches)
 
     async def show_file_suggestions_async(self) -> None:
-        """Show file suggestions; ``on_file_triggered`` runs this in a screen worker."""
+        """Show file suggestions; ``on_file_triggered`` runs this in a screen worker.
+
+        A current snapshot answers immediately; a missing or stale one waits here
+        for the rescan, which runs in this worker rather than on input.
+        """
         if self._suggestion_mode != "files" or not self._view.is_attached:
             return
-        root = self._current_file_root()
-        if self._has_current_file_index(root):
-            self._show_latest_file_query_or_head()
+        if self._file_index_for(self._current_file_root()).current:
+            # An earlier rescan finished after the trigger showed the stale rows the user may be choosing from.
+            self._show_latest_file_query_or_head(keep_selection=True)
             return
+        with contextlib.suppress(WorkerCancelled):
+            # Unmounting the screen cancels the rescan worker; that is not a failure of this one.
+            await self._request_file_rescan().wait()
 
-        self._file_warmup_requested_root = root
+    def _current_file_root(self) -> str:
+        """Return the cwd that file suggestions should be scoped to."""
+        return self._state.workspace_marker.current_cwd or self._state.workspace.current_cwd or safe_getcwd()
+
+    def _file_index_for(self, root: str) -> WorkspacePathIndex:
+        """Return the resident index for *root*, replacing one kept for another root."""
+        index = self._file_index
+        if index is not None and index.root == root:
+            return index
+        index = WorkspacePathIndex(root)
+        self._file_index = index
+        self._invalidate_file_query_results()
+        return index
+
+    def _file_snapshot(self) -> ProjectPathIndex | None:
+        """Return the snapshot installed for the current root, without building one."""
+        index = self._file_index
+        if index is None or index.root != self._current_file_root():
+            return None
+        return index.snapshot
+
+    def mark_file_index_stale(self) -> None:
+        """Mark the resident snapshot stale: the turn or rollback that just ended may have changed files.
+
+        The next ``@`` still answers from it at once and rescans in the
+        background.  A turn's after-turn hooks run after its UI stops and may
+        change files too, so a scan that ran before they finished is marked
+        stale again once they have.
+        """
+        # An index made here is still marked: a first ``@`` typed while the hooks run scans before they finish.
+        index = self._file_index_for(self._current_file_root())
+        index.mark_stale()
+        lifecycle = self._services.turn_lifecycle_task()
+        if lifecycle is not None and not lifecycle.done():
+            lifecycle.add_done_callback(lambda _task: index.mark_stale())
+
+    def discard_file_index(self) -> None:
+        """Drop the snapshot before another workspace or session takes over."""
+        self._file_index = None
+        self._invalidate_file_query_results()
+
+    def _request_file_rescan(self) -> Worker[None]:
+        """Ask the warmup worker to make the shown root's snapshot current, starting it if idle."""
+        self._file_rescan_requested = True
         worker = self._file_warmup_worker
         if worker is None or worker.is_finished:
             worker = self._view.run_suggestion_worker(
@@ -783,91 +1114,34 @@ class SuggestionHandler:
                 group="file-suggestions",
             )
             self._file_warmup_worker = worker
-        await worker.wait()
-
-    def _current_file_root(self) -> str:
-        """Return the cwd that file suggestions should be scoped to."""
-        return self._state.workspace_marker.current_cwd or self._state.workspace.current_cwd or safe_getcwd()
-
-    def _has_current_file_index(self, root: str) -> bool:
-        """Return whether the current cache/index pair is ready for *root*."""
-        return (
-            self._file_cache is not None
-            and self._file_cache_root == root
-            and self._file_index is not None
-            and self._file_index_root == root
-        )
+        return worker
 
     async def _run_file_warmup_loop(self) -> None:
-        """Coalesced scan/index warmup for file suggestions."""
-        from chrys.app.tui.widgets.chrome.file_scanner import scan_project_paths
+        """Coalesced rescans, one at a time, of the root the files popup shows.
 
-        while self._file_warmup_requested_root is not None:
-            root = self._file_warmup_requested_root
-            self._file_warmup_requested_root = None
-            if self._has_current_file_index(root):
-                self._show_latest_file_query_or_head()
-                continue
-
-            cache_generation = self._file_cache_generation
-            if not self._file_warmup_context_current(root, cache_generation):
-                self._request_latest_file_warmup_if_active()
-                continue
-
-            scan = await scan_project_paths(root)
-            if not self._file_warmup_context_current(root, cache_generation):
-                self._request_latest_file_warmup_if_active()
-                continue
-
-            index = await asyncio.to_thread(self._build_file_index, scan)
-            if not self._file_warmup_context_current(root, cache_generation):
-                self._request_latest_file_warmup_if_active()
-                continue
-
-            self._install_file_cache(root, scan, index)
-            self._show_latest_file_query_or_head()
-
-    def _request_latest_file_warmup_if_active(self) -> None:
-        """Request one follow-up warmup for the current root if file suggestions are still active."""
-        if self._suggestion_mode == "files" and self._view.is_attached:
-            self._file_warmup_requested_root = self._current_file_root()
-
-    def _file_warmup_context_current(self, root: str, cache_generation: int) -> bool:
-        """Return whether a warmed scan/index is still allowed to install."""
-        return (
-            self._view.is_attached
-            and self._suggestion_mode == "files"
-            and self._current_file_root() == root
-            and cache_generation == self._file_cache_generation
-        )
-
-    def _install_file_cache(
-        self,
-        root: str,
-        scan: ProjectPathScanResult,
-        index: ProjectPathIndex,
-    ) -> None:
-        """Install a scanned file cache and already-built query index for *root*."""
-        self._file_cache = scan.paths
-        self._file_cache_root = root
-        self._file_index = index
-        self._file_index_root = root
-
-    def _current_file_index(self) -> ProjectPathIndex | None:
-        """Return the current file index without building one synchronously."""
-        if self._file_cache is None:
-            return None
-        root = self._file_cache_root or self._current_file_root()
-        if self._file_index is None or self._file_index_root != root:
-            return None
-        return self._file_index
-
-    @staticmethod
-    def _build_file_index(scan: ProjectPathScanResult) -> ProjectPathIndex:
-        """Build a project path index from a scanner result."""
-        from chrys.app.tui.widgets.chrome.file_index import ProjectPathIndex
-
-        return ProjectPathIndex.build(scan)
+        A rescan swaps its result into the open popup keeping the highlighted
+        row, since the user may already be choosing from the stale list.
+        """
+        while self._file_rescan_requested:
+            self._file_rescan_requested = False
+            if self._suggestion_mode != "files" or not self._view.is_attached:
+                return
+            index = self._file_index_for(self._current_file_root())
+            if not index.current:
+                installed = await index.rescan()
+                if self._file_index is not index or index.root != self._current_file_root():
+                    # The workspace changed while scanning: the popup now wants the new root.
+                    self._file_rescan_requested = True
+                    continue
+                if not installed:
+                    # Keep whatever snapshot there is; without one, end the loading state.
+                    if index.snapshot is None:
+                        self._show_or_update_file_suggestions([])
+                    return
+                if index.stale:
+                    # A turn ended while this scan ran, so it may predate that turn's changes.
+                    self._file_rescan_requested = True
+            self._show_latest_file_query_or_head(keep_selection=True)
 
     def _file_suggestion_items(
         self,
@@ -894,28 +1168,40 @@ class SuggestionHandler:
             )
         return items
 
-    def _show_latest_file_query_or_head(self) -> None:
+    def _show_latest_file_query_or_head(self, *, keep_selection: bool = False) -> None:
         """Display the current file query, preserving immediate empty-query head behavior."""
         if self._suggestion_mode != "files" or not self._view.is_attached:
             return
-        index = self._current_file_index()
-        if index is None:
+        snapshot = self._file_snapshot()
+        if snapshot is None:
             return
         query = self._file_latest_query
         if query:
-            self._enqueue_file_query(query)
+            self._enqueue_file_query(query, keep_selection=keep_selection)
         else:
             self._invalidate_file_query_results()
-            self._show_or_update_file_suggestions(index.head(limit=_FILE_QUERY_LIMIT))
+            self._show_or_update_file_suggestions(snapshot.head(limit=_FILE_QUERY_LIMIT), keep_selection=keep_selection)
 
-    def _show_or_update_file_suggestions(self, paths: list[ProjectPathSuggestion]) -> None:
+    def _show_or_update_file_suggestions(
+        self,
+        paths: list[ProjectPathSuggestion],
+        *,
+        keep_selection: bool = False,
+    ) -> None:
         """Show or update the file suggestion list with *paths*."""
         if self._suggestion_mode != "files" or not self._view.is_attached:
             return
 
-        items = self._file_suggestion_items(paths, index=self._current_file_index())
+        self._file_query_resets_highlight = False
+        items = self._file_suggestion_items(paths, index=self._file_snapshot())
         if self._view.suggestions_active:
-            self._view.update_suggestions(items, title=self._suggestion_title("files"))
+            chosen = self._view.chosen_suggestion() if keep_selection else None
+            if chosen is not None and all(item.value != chosen for item in items):
+                # The rescan pushed the row the user moved to out of the shown
+                # rows: replacing them would move the highlight onto a file nobody
+                # chose. The new snapshot is installed, so the next keystroke shows it.
+                return
+            self._view.update_suggestions(items, title=self._suggestion_title("files"), keep_selection=keep_selection)
         else:
             self._show_suggestions("files", items)
 
@@ -924,14 +1210,21 @@ class SuggestionHandler:
         self._file_query_revision += 1
         self._file_query_pending = None
 
-    def _enqueue_file_query(self, query: str) -> None:
-        """Record and schedule the latest file query."""
+    def _enqueue_file_query(self, query: str, *, keep_selection: bool = False) -> None:
+        """Record and schedule the latest file query.
+
+        A keystroke's query resets the highlight. A rescan's re-query keeps it,
+        unless it replaces a keystroke's query whose rows were not shown yet.
+        """
+        if not keep_selection:
+            self._file_query_resets_highlight = True
         self._file_latest_query = query
         self._file_query_revision += 1
         revision = self._file_query_revision
-        if self._file_cache is None and self._file_index is None:
+        if self._file_snapshot() is None:
+            # Fast path only: without a snapshot the query waits for the cold build.
             return
-        self._file_query_pending = (query, revision)
+        self._file_query_pending = (query, revision, not self._file_query_resets_highlight)
         if self._file_query_worker is None or self._file_query_worker.is_finished:
             self._file_query_worker = self._view.run_suggestion_worker(
                 self._run_file_query_loop(),
@@ -940,81 +1233,56 @@ class SuggestionHandler:
             )
 
     async def _run_file_query_loop(self) -> None:
-        """Debounced, coalesced file-query worker loop."""
+        """Debounced, coalesced file-query worker loop reading the installed snapshot."""
         while self._file_query_pending is not None:
-            query, revision = self._file_query_pending
+            query, revision, keep_selection = self._file_query_pending
             self._file_query_pending = None
             await asyncio.sleep(_FILE_QUERY_DEBOUNCE_SECONDS)
             if self._file_query_pending is not None:
                 continue
 
-            index = await self._ensure_file_index_for_query(revision)
-            root = self._file_index_root
-            if index is None or root is None or not self._file_query_context_current(revision, root, index):
+            snapshot = self._file_snapshot()
+            if snapshot is None:
                 continue
+            matches = await asyncio.to_thread(snapshot.query, query, limit=_FILE_QUERY_LIMIT)
+            if self._file_query_context_current(revision, snapshot):
+                self._apply_file_query_result(matches, keep_selection=keep_selection)
 
-            matches = await asyncio.to_thread(index.query, query, limit=_FILE_QUERY_LIMIT)
-            if self._file_query_context_current(revision, root, index):
-                self._apply_file_query_result(matches)
-
-    async def _ensure_file_index_for_query(self, revision: int) -> ProjectPathIndex | None:
-        """Build the current cache index off-loop when a test-injected cache needs one."""
-        index = self._current_file_index()
-        if index is not None:
-            return index
-        if self._file_cache is None:
-            return None
-
-        root = self._file_cache_root or self._current_file_root()
-        paths = self._file_cache
-        cache_generation = self._file_cache_generation
-        from chrys.app.tui.widgets.chrome.file_scanner import ProjectPathScanResult
-
-        scan = ProjectPathScanResult.from_suggestions(root=root, paths=paths)
-        index = await asyncio.to_thread(self._build_file_index, scan)
-        if (
-            revision != self._file_query_revision
-            or cache_generation != self._file_cache_generation
-            or paths is not self._file_cache
-            or self._current_file_root() != root
-        ):
-            return None
-        self._file_index = index
-        self._file_index_root = root
-        return index
-
-    def _file_query_context_current(self, revision: int, root: str, index: ProjectPathIndex) -> bool:
+    def _file_query_context_current(self, revision: int, snapshot: ProjectPathIndex) -> bool:
         """Return whether a query result is still allowed to update the UI."""
         return (
             revision == self._file_query_revision
             and self._view.is_attached
             and self._suggestion_mode == "files"
-            and self._file_index is index
-            and self._file_index_root == root
-            and self._current_file_root() == root
+            and self._file_snapshot() is snapshot
         )
 
-    def _apply_file_query_result(self, matches: list[ProjectPathSuggestion]) -> None:
+    def _apply_file_query_result(self, matches: list[ProjectPathSuggestion], *, keep_selection: bool = False) -> None:
         """Apply current file-query results to the suggestion list."""
         if not self._view.is_attached:
             return
-        self._show_or_update_file_suggestions(matches)
+        self._show_or_update_file_suggestions(matches, keep_selection=keep_selection)
 
     # -------------------------------------------------------------- #
     # Filtering as user types
     # -------------------------------------------------------------- #
 
-    def on_text_changed(self, text: str) -> None:
+    def on_text_changed(self, text: str, *, keep_selection: bool = False) -> None:
         """Re-filter suggestion list as user types."""
         if self._suggestion_mode is None:
             return
-
         if self._suggestion_mode == "commands":
-            if text not in ("/", "\uff0f") and not is_slash_command_candidate(text):
+            if text in ("/", "\uff0f"):
+                if keep_selection:
+                    self._view.update_suggestions(
+                        self._all_command_items(), disabled=self._disabled_commands(), keep_selection=True
+                    )
+                    return
+            elif not is_slash_command_candidate(text) and not self._names_prompt_shortcut(text):
                 self.dismiss_suggestions()
                 return
             query = text.lstrip("/\uff0f")
-            if " " in query:
+            if any(character.isspace() for character in query):
                 # Support second-level suggestions when user types "/cmd ..." directly.
                 parts = query.split(None, 1)
                 cmd_name = parts[0] if parts else ""
@@ -1060,6 +1328,7 @@ class SuggestionHandler:
                     ordered_cmds.append(cmd)
             disabled = self._disabled_commands()
             items = self._command_suggestion_items(ordered_cmds, disabled)
+            items.extend(self._prompt_shortcut_suggestion_items(self._prompt_shortcuts_matching(query)))
             skills = self._state.runtime.details.skill_details
             if query:
                 skill_names = [skill.name for skill in skills]
@@ -1073,6 +1342,8 @@ class SuggestionHandler:
                 items,
                 disabled=self._disabled_commands(),
                 title=self._suggestion_title("commands"),
+                keep_selection=keep_selection,
+                initial=self._exact_command_value(query),
             )
 
         elif self._suggestion_mode == "subcommands":
@@ -1095,20 +1366,21 @@ class SuggestionHandler:
                 self._view.show_subcommand_suggestions(all_subs, initial=initial)
 
         elif self._suggestion_mode == "files":
-            idx = max(text.rfind("@"), text.rfind("\uff20"))
-            if idx < 0:
+            # The token a pick replaces (``replace_trigger_text``): the same span, so nothing typed is left behind.
+            start = completion_token_start(text, "@")
+            if start is None:
                 self.dismiss_suggestions()
                 return
-            query = text[idx + 1 :]
+            query = text[start + 1 :]
             if query:
                 self._enqueue_file_query(query)
             else:
                 self._file_latest_query = ""
                 self._invalidate_file_query_results()
-                index = self._current_file_index()
-                if index is not None:
+                snapshot = self._file_snapshot()
+                if snapshot is not None:
                     self._view.update_suggestions(
-                        self._file_suggestion_items(index.head(limit=_FILE_QUERY_LIMIT), index=index),
+                        self._file_suggestion_items(snapshot.head(limit=_FILE_QUERY_LIMIT), index=snapshot),
                         title=self._suggestion_title("files"),
                     )
 
@@ -1166,15 +1438,21 @@ class SuggestionHandler:
             if mode == "models" and not self._model_fallback_should_submit(text):
                 return True
             self.dismiss_suggestions()
-            self._view.set_input_value("")
-            if text and (mode in {"agents", "models"} or not self.dispatch_slash_command(text)):
-                self._callbacks.submit_user_text(text)
+            # What Enter does with the list closed, through the one submit path.
+            self._view.submit_input()
             return True
         return bool(selected)
 
     def on_suggestion_selected(self, mode: str, text: str, execute: bool, kind: str = "") -> None:
         """Handle a confirmed suggestion selection."""
         if mode == "commands":
+            if kind == "prompt":
+                # Enter and Tab both expand: a shortcut's text is always shown before it is sent.
+                self.dismiss_suggestions()
+                command = self._prompt_shortcut_for_value(text)
+                if command is not None:
+                    self._expand_prompt_shortcut(command, "")
+                return
             if kind == "skill":
                 self.dismiss_suggestions()
                 if execute:
@@ -1249,16 +1527,3 @@ class SuggestionHandler:
     @property
     def suggestion_mode(self) -> str | None:
         return self._suggestion_mode
-
-    @property
-    def file_cache(self) -> list[ProjectPathSuggestion] | None:
-        return self._file_cache
-
-    @file_cache.setter
-    def file_cache(self, value: list[ProjectPathSuggestion] | None) -> None:
-        self._file_cache = value
-        self._file_cache_root = None
-        self._file_index = None
-        self._file_index_root = None
-        self._file_cache_generation += 1
-        self._invalidate_file_query_results()
