@@ -4,6 +4,7 @@
 This module never executes or rewrites a command. Unsupported or incomplete
 syntax cannot yield ALLOW. Only Tree-sitter is an optional runtime dependency.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -97,22 +98,60 @@ class Policy:
     policy_id: str
     rules: tuple[Rule, ...]
 
+
 _OPAQUE = frozenset(
     {
-        ".", "bash", "builtin", "chrt", "command", "dash", "doas", "env",
-        "eval", "exec", "find", "ionice", "nice", "nohup", "sh", "source",
-        "stdbuf", "su", "sudo", "time", "timeout", "trap", "xargs",
+        ".",
+        "bash",
+        "builtin",
+        "chrt",
+        "command",
+        "dash",
+        "doas",
+        "env",
+        "eval",
+        "exec",
+        "find",
+        "ionice",
+        "nice",
+        "nohup",
+        "sh",
+        "source",
+        "stdbuf",
+        "su",
+        "sudo",
+        "time",
+        "timeout",
+        "trap",
+        "xargs",
     }
 )
-_DYNAMIC = frozenset({
-    "brace_expression", "glob_pattern", "extglob_pattern", "word_expansion",
-    "expansion", "simple_expansion", "command_substitution",
-    "process_substitution", "arithmetic_expansion", "variable_assignment",
-    "heredoc_redirect", "heredoc_body", "here_string",
-})
-_CONTAINERS = frozenset({
-    "program", "list", "pipeline", "compound_statement", "subshell",
-})
+_DYNAMIC = frozenset(
+    {
+        "brace_expression",
+        "glob_pattern",
+        "extglob_pattern",
+        "word_expansion",
+        "expansion",
+        "simple_expansion",
+        "command_substitution",
+        "process_substitution",
+        "arithmetic_expansion",
+        "variable_assignment",
+        "heredoc_redirect",
+        "heredoc_body",
+        "here_string",
+    }
+)
+_CONTAINERS = frozenset(
+    {
+        "program",
+        "list",
+        "pipeline",
+        "compound_statement",
+        "subshell",
+    }
+)
 _QUOTED = frozenset({"string", "raw_string", "ansi_c_string", "word", "concatenation", "command_name"})
 
 
@@ -127,7 +166,7 @@ def _dynamic(node: Any) -> bool:
 
 
 def _parse_command(node: Any, data: bytes) -> CommandNode:
-    text = data[node.start_byte:node.end_byte].decode("utf-8")
+    text = data[node.start_byte : node.end_byte].decode("utf-8")
     head = node.child_by_field_name("name")
     if head is None:
         return CommandNode((node.start_byte, node.end_byte), None, (), text)
@@ -145,7 +184,7 @@ def _parse_command(node: Any, data: bytes) -> CommandNode:
         if _dynamic(word):
             complete = False
             break
-        raw = data[word.start_byte:word.end_byte].decode("utf-8")
+        raw = data[word.start_byte : word.end_byte].decode("utf-8")
         if any(ch in raw for ch in "*?[") and word.type in {"word", "command_name"}:
             complete = False
             break
@@ -160,7 +199,9 @@ def _parse_command(node: Any, data: bytes) -> CommandNode:
         prefix.append(token[0])
     return CommandNode(
         (node.start_byte, node.end_byte),
-        tuple(prefix) if complete else None, tuple(prefix), text,
+        tuple(prefix) if complete else None,
+        tuple(prefix),
+        text,
     )
 
 
@@ -168,6 +209,7 @@ def _parse_command(node: Any, data: bytes) -> CommandNode:
 def _language() -> Any:
     import tree_sitter_bash
     from tree_sitter import Language
+
     return Language(tree_sitter_bash.language())
 
 
@@ -230,8 +272,7 @@ def _ensure_bash_parser() -> None:
         Parser(_language())
     except Exception as exc:
         raise RuntimeError(
-            "Enabled pre-judge requires tree-sitter==0.25.1 and "
-            "tree-sitter-bash==0.25.1 with a compatible Bash grammar"
+            "Enabled pre-judge requires tree-sitter==0.25.1 and tree-sitter-bash==0.25.1 with a compatible Bash grammar"
         ) from exc
 
 
@@ -298,9 +339,7 @@ def load_policy(path: Path) -> Policy:
     try:
         # _UniqueKeyLoader derives from SafeLoader and rejects duplicate keys.
         content = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)  # noqa: S506
-        if not isinstance(content, dict) or set(content) - {
-            "schema_version", "mode", "policy_id", "rules"
-        }:
+        if not isinstance(content, dict) or set(content) - {"schema_version", "mode", "policy_id", "rules"}:
             raise ValueError("Invalid pre-judge configuration")
         if type(content.get("schema_version")) is not int or content["schema_version"] != 1:
             raise ValueError("Invalid pre-judge schema_version")
@@ -319,6 +358,7 @@ def load_policy(path: Path) -> Policy:
             return Policy("off", "", ())
         raise
 
+
 def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     digest = _digest(command, dialect)
     if policy.mode == "off":
@@ -336,13 +376,19 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
                 matched.append(rule.id)
                 spans.append(node.source_span)
                 if rule.effect is Route.BLOCK:
-                    return PreJudgeResult(Route.BLOCK, "matched_block", tuple(matched), tuple(spans), policy.policy_id, digest)
+                    return PreJudgeResult(
+                        Route.BLOCK, "matched_block", tuple(matched), tuple(spans), policy.policy_id, digest
+                    )
                 allowed = True
         if not allowed:
             all_allowed = False
     if all_allowed:
         return PreJudgeResult(Route.ALLOW, "all_units_allowed", tuple(matched), tuple(spans), policy.policy_id, digest)
     return PreJudgeResult(
-        Route.DEFER, analysis.unsupported[0] if analysis.unsupported else "unmatched_unit",
-        tuple(matched), tuple(spans), policy.policy_id, digest,
+        Route.DEFER,
+        analysis.unsupported[0] if analysis.unsupported else "unmatched_unit",
+        tuple(matched),
+        tuple(spans),
+        policy.policy_id,
+        digest,
     )

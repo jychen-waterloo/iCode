@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Structured YAML matcher tests, independent of optional Tree-sitter."""
+
 from __future__ import annotations
 
 import pytest
@@ -74,7 +75,8 @@ def test_incomplete_argv_cannot_allow_but_static_head_can_block(monkeypatch):
 
 def test_quoted_dangerous_word_does_not_block(monkeypatch):
     monkeypatch.setattr(
-        pj, "analyze",
+        pj,
+        "analyze",
         lambda *a, **kw: pj.Analysis(True, True, (_command(["echo", "rm"]),), ()),
     )
     policy = _policy(_rule("B", pj.Route.BLOCK, "prefix_first", "rm"))
@@ -83,9 +85,13 @@ def test_quoted_dangerous_word_does_not_block(monkeypatch):
 
 def test_unsupported_syntax_never_auto_allows(monkeypatch):
     monkeypatch.setattr(
-        pj, "analyze",
+        pj,
+        "analyze",
         lambda *a, **kw: pj.Analysis(
-            True, False, (_command(["echo", "ok"]),), ("command_substitution",),
+            True,
+            False,
+            (_command(["echo", "ok"]),),
+            ("command_substitution",),
         ),
     )
     rules = _policy(_rule("echo", pj.Route.ALLOW, "argv_first", "echo"))
@@ -119,12 +125,14 @@ def test_invalid_match_schema_fails_closed(match, tmp_path, monkeypatch):
     import yaml
 
     path.write_text(
-        yaml.safe_dump({
-            "schema_version": 1,
-            "mode": "enforce",
-            "policy_id": "pilot",
-            "rules": [{"id": "A", "effect": "allow", "target": "command", "match": match}],
-        }),
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "mode": "enforce",
+                "policy_id": "pilot",
+                "rules": [{"id": "A", "effect": "allow", "target": "command", "match": match}],
+            }
+        ),
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
@@ -136,8 +144,8 @@ def test_prefix_match_cannot_allow(tmp_path, monkeypatch):
     path = tmp_path / "prejudge.yaml"
     path.write_text(
         'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
-        'rules:\n  - id: A\n    effect: allow\n    target: command\n'
-        '    match:\n      prefix_first: [git]\n',
+        "rules:\n  - id: A\n    effect: allow\n    target: command\n"
+        "    match:\n      prefix_first: [git]\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="cannot be used to ALLOW"):
@@ -149,8 +157,8 @@ def test_argv_first_block_is_rejected_at_policy_load(tmp_path, monkeypatch):
     path = tmp_path / "prejudge.yaml"
     path.write_text(
         'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
-        'rules:\n  - id: B\n    effect: block\n    target: command\n'
-        '    match:\n      argv_first: [rm]\n',
+        "rules:\n  - id: B\n    effect: block\n    target: command\n"
+        "    match:\n      argv_first: [rm]\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="use prefix_first"):
@@ -163,14 +171,17 @@ def test_actual_yaml_rule_load_and_route(tmp_path, monkeypatch):
         pj,
         "analyze",
         lambda *a, **kw: pj.Analysis(
-            True, True, (_command(["git", "status"]),), (),
+            True,
+            True,
+            (_command(["git", "status"]),),
+            (),
         ),
     )
     path = tmp_path / "prejudge.yaml"
     path.write_text(
         'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
-        'rules:\n  - id: allow-status\n    effect: allow\n'
-        '    target: command\n    match:\n      argv_exact: [git, status]\n',
+        "rules:\n  - id: allow-status\n    effect: allow\n"
+        "    target: command\n    match:\n      argv_exact: [git, status]\n",
         encoding="utf-8",
     )
     policy = pj.load_policy(path)
@@ -186,8 +197,8 @@ def test_actual_yaml_rule_load_and_route(tmp_path, monkeypatch):
         'schema_version: 1\nmode: "off"\nunknown: true',
         (
             'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
-            'rules:\n  - id: A\n    effect: allow\n    target: command\n'
-            '    when: \'argv == ["git"]\''
+            "rules:\n  - id: A\n    effect: allow\n    target: command\n"
+            "    when: 'argv == [\"git\"]'"
         ),
     ],
 )
@@ -205,9 +216,9 @@ def test_duplicate_yaml_match_key_is_rejected(tmp_path, monkeypatch):
     file = tmp_path / "prejudge.yaml"
     file.write_text(
         'schema_version: 1\nmode: "enforce"\npolicy_id: pilot\n'
-        'rules:\n  - id: A\n    effect: allow\n    target: command\n'
-        '    match:\n      argv_exact: [git, status]\n'
-        '      argv_exact: [rm]\n',
+        "rules:\n  - id: A\n    effect: allow\n    target: command\n"
+        "    match:\n      argv_exact: [git, status]\n"
+        "      argv_exact: [rm]\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="Duplicate YAML policy key"):
@@ -219,8 +230,8 @@ def test_shadow_invalid_policy_disables_observation(tmp_path, monkeypatch):
     file = tmp_path / "prejudge.yaml"
     file.write_text(
         'schema_version: 1\nmode: "shadow"\npolicy_id: pilot\n'
-        'rules:\n  - id: B\n    effect: block\n    target: command\n'
-        '    match:\n      unsupported: [rm]\n',
+        "rules:\n  - id: B\n    effect: block\n    target: command\n"
+        "    match:\n      unsupported: [rm]\n",
         encoding="utf-8",
     )
     assert pj.load_policy(file).mode == "off"

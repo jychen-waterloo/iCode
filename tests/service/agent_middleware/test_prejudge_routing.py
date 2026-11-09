@@ -1,5 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Structured pre-judge middleware decisions without importing optional parsers."""
+
 from __future__ import annotations
 
 import pytest
@@ -20,29 +21,33 @@ from chrys.service.profiles.agents.schema import ApprovalConfig
 from tests.support.event_capture import capture_events
 
 
-@pytest.mark.parametrize(("mode", "suggestion", "expected_executions", "expected_requests"), [
-    ("enforce", Route.BLOCK, 0, 0),
-    ("enforce", Route.ALLOW, 1, 0),
-    ("enforce", Route.DEFER, 1, 1),
-    ("shadow", Route.BLOCK, 1, 0),
-])
+@pytest.mark.parametrize(
+    ("mode", "suggestion", "expected_executions", "expected_requests"),
+    [
+        ("enforce", Route.BLOCK, 0, 0),
+        ("enforce", Route.ALLOW, 1, 0),
+        ("enforce", Route.DEFER, 1, 1),
+        ("shadow", Route.BLOCK, 1, 0),
+    ],
+)
 async def test_shell_routes_do_not_bypass_or_mutate_legacy(
     monkeypatch, mode, suggestion, expected_executions, expected_requests
 ):
     monkeypatch.setattr(approval_module, "load_policy", lambda _: Policy(mode, "pilot", ()))
     monkeypatch.setattr(
-        approval_module, "route",
-        lambda cmd, dialect, policy: PreJudgeResult(
-            suggestion, "test", (), (), policy.policy_id, "digest"
-        ),
+        approval_module,
+        "route",
+        lambda cmd, dialect, policy: PreJudgeResult(suggestion, "test", (), (), policy.policy_id, "digest"),
     )
     tool = FunctionTool(name="bash")
     set_tool_kind(tool, KIND_SHELL)
     bus = EventBus()
     requests = []
+
     async def approve(req: ApprovalRequest):
         requests.append(req)
         await bus.publish(ApprovalResponse(request_id=req.request_id, approved=True))
+
     await bus.subscribe(ApprovalRequest, approve)
     middleware = ApprovalMiddleware(
         ApprovalPolicy(ApprovalConfig(default="require"), tools=[tool]),
@@ -51,9 +56,11 @@ async def test_shell_routes_do_not_bypass_or_mutate_legacy(
     )
     context = FunctionInvocationContext(tool, {"command": "ls"})
     executed = 0
+
     async def execute():
         nonlocal executed
         executed += 1
+
     try:
         await middleware.process(context, execute)
         assert executed == expected_executions
@@ -67,8 +74,10 @@ async def test_shell_routes_do_not_bypass_or_mutate_legacy(
 
 async def test_non_shell_tool_never_invokes_prejudge(monkeypatch):
     monkeypatch.setattr(approval_module, "load_policy", lambda _: Policy("enforce", "pilot", ()))
+
     def forbidden(*args, **kwargs):
         pytest.fail("Non-shell call must not enter pre-judge")
+
     monkeypatch.setattr(approval_module, "route", forbidden)
     tool = FunctionTool(name="other_tool")
     context = FunctionInvocationContext(tool, {})
@@ -78,9 +87,11 @@ async def test_non_shell_tool_never_invokes_prejudge(monkeypatch):
         bus,
     )
     executed = False
+
     async def execute():
         nonlocal executed
         executed = True
+
     try:
         await middleware.process(context, execute)
         assert executed
@@ -108,7 +119,8 @@ async def test_middleware_rejection_source_is_persisted(monkeypatch, source, exp
         approval_mode=ApprovalMode.MANUAL,
     )
     event_mw = ToolEventMiddleware(
-        bus, session_id="test",
+        bus,
+        session_id="test",
         origin=InvocationOrigin("turn", "test", "turn-prejudge", None),
     )
     context = FunctionInvocationContext(tool, {"command": "rm fixture"})
@@ -120,14 +132,16 @@ async def test_middleware_rejection_source_is_persisted(monkeypatch, source, exp
 
     if source == "prejudge":
         monkeypatch.setattr(
-            approval_module, "route",
+            approval_module,
+            "route",
             lambda cmd, dialect, policy: PreJudgeResult(
                 Route.BLOCK, "matched_block", (), (), policy.policy_id, "digest"
             ),
         )
     else:
         monkeypatch.setattr(
-            approval_module, "route",
+            approval_module,
+            "route",
             lambda cmd, dialect, policy: PreJudgeResult(
                 Route.DEFER, "unmatched_unit", (), (), policy.policy_id, "digest"
             ),

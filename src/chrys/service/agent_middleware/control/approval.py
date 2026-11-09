@@ -358,9 +358,7 @@ class ApprovalMiddleware(FunctionMiddleware):
         policy_requires_approval = self._policy.should_require_approval(tool_name, tool_kind)
         pre_route = None
         prejudge_scoped = (
-            tool_kind == KIND_SHELL
-            and self._prejudge.mode != "off"
-            and self._approval_mode != ApprovalMode.BYPASS
+            tool_kind == KIND_SHELL and self._prejudge.mode != "off" and self._approval_mode != ApprovalMode.BYPASS
         )
         if prejudge_scoped:
             raw = context.arguments
@@ -374,8 +372,11 @@ class ApprovalMiddleware(FunctionMiddleware):
                         observed = route(cmd, tool_name, self._prejudge)
                         _prejudge_logger.info(
                             "shadow route=%s reason=%s policy=%s digest=%s rules=%s",
-                            observed.route, observed.reason_code, observed.policy_id,
-                            observed.analysis_digest, observed.matched_rule_ids,
+                            observed.route,
+                            observed.reason_code,
+                            observed.policy_id,
+                            observed.analysis_digest,
+                            observed.matched_rule_ids,
                         )
                     except Exception:
                         _prejudge_logger.exception("shadow pre-judge evaluation failed")
@@ -390,18 +391,26 @@ class ApprovalMiddleware(FunctionMiddleware):
                     if pre_route is not None:
                         _prejudge_logger.info(
                             "enforce route=%s reason=%s policy=%s digest=%s rules=%s",
-                            pre_route.route, pre_route.reason_code, pre_route.policy_id,
-                            pre_route.analysis_digest, pre_route.matched_rule_ids,
+                            pre_route.route,
+                            pre_route.reason_code,
+                            pre_route.policy_id,
+                            pre_route.analysis_digest,
+                            pre_route.matched_rule_ids,
                         )
                         if pre_route.route is Route.BLOCK:
                             context.metadata[_APPROVAL_REJECTED_KEY] = True
                             context.metadata[_REJECTION_SOURCE_KEY] = "prejudge"
                             context.metadata[_REJECTION_MESSAGE_KEY] = "Command blocked by structured pre-judge."
                             context.result = "Error: Command blocked by structured pre-judge."
-                            self._decisions.append(_decision(
-                                request_id="", tool_name=tool_name, status="prejudge_blocked",
-                                call_id=call_id, tool_order=tool_order,
-                            ))
+                            self._decisions.append(
+                                _decision(
+                                    request_id="",
+                                    tool_name=tool_name,
+                                    status="prejudge_blocked",
+                                    call_id=call_id,
+                                    tool_order=tool_order,
+                                )
+                            )
                             return
         if (
             not policy_requires_approval
@@ -423,13 +432,19 @@ class ApprovalMiddleware(FunctionMiddleware):
             and not sensitive_shell
             and isinstance(context.arguments, dict)
             and not shell_command_may_access_sensitive_data(
-                context.arguments.get("command", ""), shell_name=tool_name,
+                context.arguments.get("command", ""),
+                shell_name=tool_name,
             )
         ):
-            self._decisions.append(_decision(
-                request_id="", tool_name=tool_name, status="prejudge_approved",
-                call_id=call_id, tool_order=tool_order,
-            ))
+            self._decisions.append(
+                _decision(
+                    request_id="",
+                    tool_name=tool_name,
+                    status="prejudge_approved",
+                    call_id=call_id,
+                    tool_order=tool_order,
+                )
+            )
             await call_next()
             return
 
