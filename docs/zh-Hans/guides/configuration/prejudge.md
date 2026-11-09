@@ -36,7 +36,7 @@ rules:
 | `argv_first: [echo]` | 完整静态参数列表的第一个 token 相等 | **仅 ALLOW** |
 | `prefix_first: [rm]` | 可确定的静态前缀的第一个 token 相等，即使后面有动态参数 | **只允许 BLOCK** |
 
-值必须是非空字符串组成的**列表**，即使只有一个 token。`argv_first: [git]` 的 ALLOW 会匹配所有 Git 子命令，包括可能修改数据的操作；对含有高风险参数的命令优先使用 `argv_exact`。不允许将 `argv_first` 用于 BLOCK，因为 `rm "$TARGET"`、`rm *.log` 等动态尾参不会触发阻断；此类规则应使用 `prefix_first`。未知字段、多个匹配字段、空值、非字符串值和旧版 CEL `when:` 表达式都会在加载时拒绝。此前实验性 `when:` 配置必须人工迁移；本版本的 `schema_version: 1` 不提供自动兼容。
+值必须是非空字符串组成的**列表**，即使只有一个 token。`argv_first: [git]` 的 ALLOW 会匹配所有 Git 子命令，包括可能修改数据的操作；对含有高风险参数的命令优先使用 `argv_exact`。不允许将 `argv_first` 用于 BLOCK，因为 `rm "$TARGET"`、`rm *.log` 等动态尾参不会触发阻断；此类规则应使用 `prefix_first`。未知字段、多个匹配字段、空值和非字符串值都会在加载时被拒绝。策略格式版本为 `schema_version: 1`。
 
 ### 鉴权语义
 
@@ -46,4 +46,4 @@ BLOCK 优先于 ALLOW。要自动 ALLOW，必须所有可执行 AST 节点匹配
 
 当前只支持 Bash/Git Bash。zsh、sh、dash、PowerShell、cmd.exe、动态展开、重定向、通配符及多数控制流构造不允许自动 ALLOW；内部可靠识别的静态命令仍有机会触发 BLOCK。匹配采用字面量命令名，不自动规范化可执行文件路径。例如 `prefix_first: [rm]` 不会命中 `/bin/rm -rf x`，而是进入 DEFER（不会自动允许）。像 `command rm`、`env rm`、`time rm` 这样的包装命令按 opaque 处理并 DEFER，不能假设 `prefix_first: [rm]` 会命中包装命令里的 `rm`。本功能不能取代完整的 Shell 安全边界。
 
-**依赖：**启用该功能需要 `tree-sitter==0.25.1` 与 `tree-sitter-bash==0.25.1`。不再依赖 CEL、额外自编译 wheel 或侧车进程；默认 `off` 不会加载 Tree-sitter。依赖锁定和 Linux 离线发行的完整验证仍属于独立发行验收项。
+**依赖：**启用该功能需要 `tree-sitter==0.25.1` 与 `tree-sitter-bash==0.25.1`。默认 `off` 不会加载 Tree-sitter。依赖锁定和 Linux 离线发行的完整验证仍属于独立发行验收项。
