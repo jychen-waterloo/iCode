@@ -191,7 +191,9 @@ def test_actual_yaml_rule_load_and_route(tmp_path, monkeypatch):
         ),
     ],
 )
-def test_invalid_config(tmp_path, config):
+def test_invalid_config(tmp_path, config, monkeypatch):
+    # Exercise YAML schema validation without the optional Tree-sitter backend.
+    monkeypatch.setattr(pj, "_ensure_bash_parser", lambda: None)
     file = tmp_path / "prejudge.yaml"
     file.write_text(config, encoding="utf-8")
     with pytest.raises(ValueError):
