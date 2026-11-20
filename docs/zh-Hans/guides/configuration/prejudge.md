@@ -1,6 +1,6 @@
 # 结构化 Shell Pre-Judge
 
-iCode 可以使用 Tree-sitter 和字面量 YAML 规则分析 Bash 指令，再进入原有工具审批。功能**默认关闭**，只返回 **ALLOW** 或 **DEFER**：ALLOW 提供快捷自动审批，DEFER 交给原有审批流程；Pre-Judge 本身不拒绝命令。原有 Hook、审批策略、只读快捷审批、DAA（已有授权复用机制）、已记住的授权和**执行前** Shell Command Filter 的行为均保留。
+iCode 可以使用 Tree-sitter 和字面量 YAML 规则分析 Bash、Zsh 和 PowerShell 指令，再进入原有工具审批。功能**默认关闭**，只返回 **ALLOW** 或 **DEFER**。ALLOW 提供快捷自动审批，DEFER 交给原有审批流程。原有 Hook、审批策略、只读快捷审批、已记住的授权和**执行前** Shell Command Filter 仍然适用。
 
 将配置存放在受信任的用户级目录中（macOS/Linux 通常为 `~/.chrys/prejudge.yaml`），不会从项目工作目录加载策略。
 
@@ -38,9 +38,21 @@ rules:
 
 推荐使用 `mode: "off"`、`mode: "shadow"` 或 `mode: "enforce"`。未加引号的 `mode: off`（YAML 将其解析为布尔值 `False`）、`mode: false` 和空文件也会关闭功能，且不会加载 Tree-sitter。`shadow` 只记录建议的 ALLOW/DEFER，不执行快捷审批；`enforce` 执行符合条件的 ALLOW。**YAML 语法本身损坏**时，正常审批启动会报包含文件路径的错误，即使原本意图声明 `shadow`。可正常解析且明确声明 `shadow` 的配置，若规则或依赖无效，会记录含文件路径（和适用时规则 ID）的警告并停止观察；无效的 `enforce` 规则会报包含文件路径和规则 ID 的错误。BYPASS 不会加载或验证 `prejudge.yaml`；如果此会话随后切换到 MANUAL/AUTO，届时才加载配置。
 
-AST Matcher 当前只支持 Bash/Git Bash。zsh、sh、dash、PowerShell、cmd.exe、动态展开、重定向、通配符及多数控制流构造均 DEFER。不支持的 Shell 方言会发出警告，说明结构化 ALLOW 不生效，但原有只读快捷审批仍会应用。例如，zsh 的 `ls` 和 PowerShell 的 `Get-ChildItem` 保留原有只读审批行为。匹配采用字面量命令名，不自动规范化可执行文件路径：`rm` 的规则不会匹配 `/bin/rm`。`command`、`env`、`time` 等包装命令也会 DEFER 到原有审批流程。Pre-Judge 是快捷审批层，不是 Shell 安全边界。
+### 支持的 Shell、语法与可执行文件身份
 
-**依赖：**启用该功能需要 `tree-sitter==0.25.1` 与 `tree-sitter-bash==0.25.1`。默认 `off` 不会加载 Tree-sitter。依赖锁定和 Linux 离线发行的完整验证仍属于独立发行验收项。
+| Shell | Tree-sitter 文法 | 支持的语法 |
+| --- | --- | --- |
+| Bash / Git Bash | `tree-sitter-bash==0.25.1` | 静态 Bash 参数、引号、管道及已支持的复合命令。现有 Bash 规则行为保留。 |
+| Zsh | `tree-sitter-zsh==0.64.3` | 简单命令、无引号参数、单引号与双引号字面量、独立语句及简单管道。 |
+| Windows PowerShell 5.1（`powershell`）和 PowerShell 7+（`pwsh`） | `tree-sitter-pwsh==0.38.1` | 简单命令、字面量参数、独立的参数名（如 `-LiteralPath`）、独立语句及简单管道。 |
+
+Zsh 和 PowerShell 的每条命令还须以**受信任可执行文件的字面量绝对路径**开头，才能由匹配规则 ALLOW。在 Windows PowerShell 和 Windows `pwsh` 中，使用带盘符的 `.exe` 路径。例如，Zsh 可用 `argv_exact: ['/usr/bin/git', status]`，Windows 可用 `argv_exact: ['C:/Windows/System32/whoami.exe', /user]`。规则按原始路径拼写匹配并区分大小写，即使 Shell 本身不区分大小写。请选择自己控制或信任的路径。
+
+Zsh 的 `git status` 和 PowerShell 的 `Get-Content -LiteralPath README.md` 可以提取静态参数，但由于尚未确认可执行文件或 cmdlet 的身份，会返回 DEFER。裸命令名可能解析为别名、函数、cmdlet 或 PATH 上的程序。这两种方言通过结构化 ALLOW 时，Shell 会跳过用户启动文件或配置文件。Zsh 仍会读取系统 `zshenv`，此检查依赖受信任的 Shell 安装与遵守启动选项的系统配置。
+
+Zsh 和 PowerShell 适配器只接受经过验证的 ASCII 字面量子集。动态展开、Zsh glob 限定符、依赖选项的模式与历史展开、PowerShell 参数展开（splatting）、调用运算符与脚本块、重定向和解析错误均 DEFER。Windows 原生命令在不同 PowerShell 版本间存在引号处理差异，相关参数也会 DEFER。`sh`、`dash`、`fish` 和 `cmd.exe` 等未支持的 Shell 继续走原审批流程。
+
+**依赖：**启用 Pre-Judge 时，在运行 iCode 的 Python 环境安装 `tree-sitter==0.25.1` 和固定版本的 Bash 文法。使用 Zsh 或 PowerShell 适配器时，再安装相应文法。附加文法缺失或不兼容时，该方言会 DEFER。可选文法提供兼容 Python 3.14 的 Linux、macOS 和 Windows wheel。标准 wheel 和离线发行包不包含这些可选依赖。开发环境通过 `uv sync` 安装，`off` 模式不会加载它们。
 
 ### 审批及执行边界
 
@@ -58,4 +70,4 @@ AST Matcher 当前只支持 Bash/Git Bash。zsh、sh、dash、PowerShell、cmd.e
 
 ### 兼容性与当前限制
 
-DEFER 直接复用既有只读检查器，而不再用另一套 YAML 引擎重写它。原有能力和限制均保留，包括各 Shell 的处理方式。这条快捷审批与 `shell_filter: read_only` 预设相互独立，两者语义不同。即使原有快捷审批允许某条命令，AST 层也不会把未展开的 glob 认定为完整的静态 `argv_exact` 参数。兼容性测试覆盖了代表性案例，并不证明所有可能命令都安全。
+DEFER 继续走现有只读检查器和正常审批。例如，Zsh 的 `ls` 和 PowerShell 的 `Get-ChildItem` 仍可能通过只读快捷审批。该检查器可能允许带 glob 的命令，即使 AST 适配器无法验证展开后的参数。将只读检查器迁移到 YAML 是独立的设计问题。`shell_filter: read_only` 预设是独立的执行检查。规则作者应确认所授权的可执行文件和参数的行为。

@@ -62,7 +62,7 @@ def test_unsupported_commands_cannot_be_fully_allowed(cmd):
     assert not result.coverage_complete
 
 
-@pytest.mark.parametrize("dialect", ["zsh", "pwsh", "cmd", "dash"])
+@pytest.mark.parametrize("dialect", ["cmd", "dash", "fish", "sh"])
 def test_unsupported_shell_dialect_is_explicit_defer(dialect):
     result = analyze("git status", dialect=dialect)
     assert "unsupported_dialect" in result.unsupported

@@ -55,7 +55,8 @@ from chrys.service.agent_middleware.events.hook_dispatch import (
 from chrys.service.approval.arbitration import ApprovalDecisionArbiter, ApprovalJudgeInput
 from chrys.service.approval.correlation import OneShotCorrelation
 from chrys.service.approval.policy import ApprovalMode
-from chrys.service.approval.prejudge_v2 import Policy, Route, load_policy, route
+from chrys.service.approval.prejudge_v2 import ADAPTED_DIALECTS, Policy, Route, load_policy, route
+from chrys.service.approval.prejudge_v2.execution import isolated_shell_call
 from chrys.service.approval.reuse_binding import ApprovalReuseBinding, PreparedReuse
 from chrys.service.approval.safety_classifier import (
     path_arg_may_access_sensitive_data,
@@ -509,7 +510,14 @@ class ApprovalMiddleware(FunctionMiddleware):
                     tool_order=tool_order,
                 )
             )
-            await call_next()
+            if tool_name in ADAPTED_DIALECTS:
+                token = isolated_shell_call.set((tool_name, context.arguments["command"]))
+                try:
+                    await call_next()
+                finally:
+                    isolated_shell_call.reset(token)
+            else:
+                await call_next()
             return
 
         # Auto-approve safe read-only shell commands (e.g. ls, cat, grep)

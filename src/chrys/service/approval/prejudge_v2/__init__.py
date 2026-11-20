@@ -18,6 +18,10 @@ from typing import Any, Literal
 import yaml
 from yaml.resolver import BaseResolver
 
+from ._adapters import ADAPTED_DIALECTS, analyze_adapted, explicit_executable
+from ._analysis import Analysis as Analysis
+from ._analysis import CommandNode as CommandNode
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,22 +48,6 @@ _UniqueKeyLoader.add_constructor(
 class Route(StrEnum):
     ALLOW = "allow"
     DEFER = "defer"
-
-
-@dataclass(frozen=True, slots=True)
-class CommandNode:
-    source_span: tuple[int, int]
-    argv: tuple[str, ...] | None
-    prefix: tuple[str, ...]
-    text: str
-
-
-@dataclass(frozen=True, slots=True)
-class Analysis:
-    syntax_valid: bool
-    coverage_complete: bool
-    executable_nodes: tuple[CommandNode, ...]
-    unsupported: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +94,7 @@ def _warn_unsupported_dialect(dialect: str) -> None:
     )
 
 
+_BASH_DIALECTS = frozenset({"bash", "git_bash"})
 _OPAQUE = frozenset(
     {
         ".",
@@ -133,6 +122,17 @@ _OPAQUE = frozenset(
         "xargs",
     }
 )
+_ADAPTED_OPAQUE = _OPAQUE | {
+    "cmd",
+    "cscript",
+    "fish",
+    "invoke-expression",
+    "ksh",
+    "powershell",
+    "pwsh",
+    "wscript",
+    "zsh",
+}
 _DYNAMIC = frozenset(
     {
         "brace_expression",
@@ -346,7 +346,7 @@ def _language() -> Any:
 
 
 def analyze(command: str, *, dialect: str = "bash") -> Analysis:
-    if dialect not in {"bash", "git_bash"}:
+    if dialect not in _BASH_DIALECTS and dialect not in ADAPTED_DIALECTS:
         return Analysis(False, False, (), ("unsupported_dialect",))
     try:
         data = command.encode("utf-8")
@@ -354,6 +354,8 @@ def analyze(command: str, *, dialect: str = "bash") -> Analysis:
         return Analysis(False, False, (), ("parse_error",))
     if len(data) > 65536:
         return Analysis(False, False, (), ("limit_exceeded",))
+    if dialect in ADAPTED_DIALECTS:
+        return analyze_adapted(data, dialect=dialect)
     contains_line_continuation = b"\\\n" in data
     try:
         from tree_sitter import Parser
@@ -507,12 +509,21 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     if policy.mode == "off":
         return PreJudgeResult(Route.DEFER, "off", (), (), policy.policy_id, digest)
     analysis = analyze(command, dialect=dialect)
-    if dialect not in {"bash", "git_bash"}:
+    if dialect not in _BASH_DIALECTS and dialect not in ADAPTED_DIALECTS:
         _warn_unsupported_dialect(dialect)
     matched: list[str] = []
     spans: list[tuple[int, int]] = []
     all_allowed = analysis.coverage_complete
+    reason = analysis.unsupported[0] if analysis.unsupported else "unmatched_unit"
     for node in analysis.executable_nodes:
+        if dialect in ADAPTED_DIALECTS and node.argv:
+            name = node.argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower().removesuffix(".exe")
+            if name in _ADAPTED_OPAQUE:
+                reason = "opaque_carrier"
+                all_allowed = False
+            elif not explicit_executable(node.argv, dialect):
+                reason = "unresolved_executable"
+                all_allowed = False
         allowed = False
         for rule in policy.rules:
             # ALLOW requires complete argv, never only a static prefix.
@@ -526,7 +537,7 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
         return PreJudgeResult(Route.ALLOW, "all_units_allowed", tuple(matched), tuple(spans), policy.policy_id, digest)
     return PreJudgeResult(
         Route.DEFER,
-        analysis.unsupported[0] if analysis.unsupported else "unmatched_unit",
+        reason,
         tuple(matched),
         tuple(spans),
         policy.policy_id,

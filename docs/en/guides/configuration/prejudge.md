@@ -1,6 +1,6 @@
 # Structured Shell Pre-Judge
 
-iCode can optionally inspect Bash commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut; DEFER continues through existing approval. Pre-Judge does not deny commands. Existing Hooks, approval policy, the read-only shortcut, DAA (the existing authorization-reuse mechanism), remembered grants, and the **pre-execution** Shell Command Filter retain their existing behavior.
+iCode can optionally inspect Bash, Zsh, and PowerShell commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut. DEFER continues through existing approval. Existing Hooks, approval policy, the read-only shortcut, remembered grants, and the **pre-execution** Shell Command Filter still apply.
 
 Place `prejudge.yaml` in iCode's trusted user configuration directory (`~/.chrys/prejudge.yaml` on macOS/Linux). Workspace files do not provide rules.
 
@@ -38,9 +38,21 @@ A structured ALLOW requires **every executable AST node** to match an ALLOW rule
 
 Use `mode: "off"`, `mode: "shadow"`, or `mode: "enforce"`. Unquoted `mode: off` (parsed by YAML as `False`), `mode: false`, and an empty file also disable the feature without loading Tree-sitter. `shadow` logs proposed ALLOW/DEFER decisions without acting on them; `enforce` applies eligible ALLOW shortcuts. Malformed YAML **syntax** raises a path-qualified error at ordinary approval startup, even if the intended mode was `shadow`. Parseable `shadow` YAML with invalid rules or dependencies instead warns (with the file path and rule ID where applicable) and disables observation. Invalid `enforce` rules fail with the file path and rule ID. A BYPASS run does not load or validate `prejudge.yaml`; if approval mode later changes to MANUAL/AUTO, the policy is loaded then.
 
-The **AST matchers** support only Bash / Git Bash. Unsupported shells (zsh, sh, dash, PowerShell, cmd.exe), redirections, dynamic expansions, globs, and most control-flow constructs DEFER. The unsupported-dialect warning states that structured ALLOW is inactive and that the existing read-only shortcut still applies. For example, zsh `ls` and PowerShell `Get-ChildItem` retain their existing read-only approval. Matching uses literal command words without normalizing executable paths: a rule for `rm` does not match `/bin/rm`. Opaque wrappers such as `command`, `env` and `time` also DEFER to existing approval. Pre-Judge is an approval shortcut, not a shell security boundary.
+### Shells, syntax, and executable identity
 
-**Dependencies:** enabled configurations require the optional Tree-sitter parser packages `tree-sitter==0.25.1` and `tree-sitter-bash==0.25.1`. The packages must be installed for the running Python/platform; the normal `off` mode does not import them. The dependency lock and Linux offline-bundle verification are separate release gates.
+| Shell | Tree-sitter grammar | Supported syntax |
+| --- | --- | --- |
+| Bash / Git Bash | `tree-sitter-bash==0.25.1` | Static Bash argv, quoting, pipelines, and supported compound commands. Existing Bash rules keep their behavior. |
+| Zsh | `tree-sitter-zsh==0.64.3` | Simple commands, bare arguments, single and double quoted literals, independent statements, and simple pipelines. |
+| Windows PowerShell 5.1 (`powershell`) and PowerShell 7+ (`pwsh`) | `tree-sitter-pwsh==0.38.1` | Simple commands, literal arguments, separate parameter tokens such as `-LiteralPath`, independent statements, and simple pipelines. |
+
+For Zsh and PowerShell, a matching rule also needs a **literal absolute path to a trusted executable** for every command. On Windows PowerShell and Windows `pwsh`, use a drive-qualified `.exe` path. For example, use `argv_exact: ['/usr/bin/git', status]` on Zsh or `argv_exact: ['C:/Windows/System32/whoami.exe', /user]` on Windows. Matching is case-sensitive and compares the literal path spelling, even when the shell resolves names case-insensitively. Use a path you control or trust.
+
+Zsh `git status` and PowerShell `Get-Content -LiteralPath README.md` have static arguments but DEFER because the executable or cmdlet identity is unresolved. A bare name can resolve to an alias, a function, a cmdlet, or a program on PATH. A structured ALLOW in these dialects starts the shell without user startup files or profiles. Zsh still reads the system `zshenv`; the gate assumes the installed shell and system startup configuration are trusted and honor the startup flags.
+
+The Zsh and PowerShell adapters accept a conservative ASCII literal subset. Dynamic expansion, Zsh glob qualifiers, option-dependent patterns and history expansion, PowerShell splatting, invocation operators and script blocks, redirections, and parse errors DEFER. PowerShell also defers Windows native arguments whose quoting differs across versions. Unsupported shells such as `sh`, `dash`, `fish`, and `cmd.exe` continue through existing approval.
+
+**Dependencies:** install `tree-sitter==0.25.1` and the pinned Bash grammar into the Python environment running iCode to enable Pre-Judge. Install the corresponding Zsh or PowerShell grammar to use that adapter. An unavailable or incompatible additional grammar causes that dialect to DEFER. The optional grammars have Python 3.14-compatible wheels for Linux, macOS, and Windows. The standard wheel and offline distribution omit these optional packages. `uv sync` installs them for development, and `off` mode does not load them.
 
 ### Approval and execution boundaries
 
@@ -58,4 +70,4 @@ If that first switch fails to load the policy, the requested MANUAL/AUTO mode st
 
 ### Compatibility and limitations
 
-DEFER delegates to the existing read-only checker; it does not reimplement that checker as a second YAML engine. Its existing capabilities and limitations are retained, including shell-specific handling. This shortcut remains separate from the `shell_filter: read_only` preset, which has different semantics. The AST layer does not certify a glob as a fully resolved `argv_exact` vector, even when the legacy shortcut independently approves the command. Compatibility tests cover representative cases; they are not a proof of safety for every possible command.
+DEFER continues to the existing read-only checker and ordinary approval. For example, Zsh `ls` and PowerShell `Get-ChildItem` may still qualify for the read-only shortcut. The checker can approve commands containing globs even though the AST adapter cannot certify expanded argv. Moving the read-only checker into YAML is a separate design question. The `shell_filter: read_only` preset is an independent execution check. The policy author is responsible for the behavior of the trusted executables and arguments a rule authorizes.
