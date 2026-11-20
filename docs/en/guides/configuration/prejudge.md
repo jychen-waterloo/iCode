@@ -25,7 +25,7 @@ Each rule uses `effect: allow`, `target: command`, and exactly **one** top-level
 | `argv_exact: [git, status]` | Full literal argument vector equals exactly the given non-empty sequence | ALLOW |
 | `argv_first: [echo]` | First token of the complete literal argument vector equals the given token | **ALLOW only** |
 
-Matchers require **lists of non-empty literal strings**, even when there is only one token. An ALLOW rule using `argv_first: [git]` would grant *all* Git subcommands with complete static arguments, including mutating ones; prefer `argv_exact` for commands with risk-bearing arguments. Unknown keys, multiple matcher fields, empty lists, and non-string values are rejected during policy loading. The removed `effect: block` and `prefix_first` are rejected rather than silently ignored; remove those rules from older configurations. The policy schema version is `1`.
+Matchers require **lists of non-empty literal strings**, even when there is only one token. `argv_first: [git]` matches every static Git subcommand, including mutating ones. The executable check still applies, and a broad rule such as `argv_first: ['/usr/bin/git']` can authorize mutating subcommands on eligible systems. Prefer `argv_exact` to limit the permitted arguments. Unknown keys, multiple matcher fields, empty lists, and non-string values are rejected during policy loading. Remove older rules that use `effect: block` or `prefix_first`. The policy schema version is `1`.
 
 ### Decision safety
 

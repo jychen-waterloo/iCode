@@ -79,7 +79,7 @@ def test_bash_does_not_certify_unmodeled_tokens(dialect):
         ("git_bash", "/usr/bin/printf", "$'\\x2eenv'", True),
         ("zsh", "/usr/bin/printf", "'.env'", True),
         ("powershell", "C:/Windows/System32/whoami.exe", "'.env:fixture'", True),
-        ("pwsh", "C:/Windows/System32/whoami.exe", "'.env:fixture'", True),
+        ("pwsh", "C:/Windows/System32/whoami.exe", "'C:.env:fixture'", True),
         *((dialect, "fixture_command", "sample # note", False) for dialect in _DIALECTS),
     ],
 )

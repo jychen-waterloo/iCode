@@ -25,7 +25,7 @@ rules:
 | `argv_exact: [git, status]` | 完整静态参数列表与给定序列完全相等 | ALLOW |
 | `argv_first: [echo]` | 完整静态参数列表的第一个 token 相等 | **仅 ALLOW** |
 
-匹配器必须使用非空字符串**列表**，即使只有一个 token。`argv_first: [git]` 的 ALLOW 会匹配所有参数完整且静态的 Git 子命令，包括可能修改数据的操作；对含有高风险参数的命令优先使用 `argv_exact`。未知字段、多个匹配字段、空值和非字符串值都会在加载时被拒绝。已移除的 `effect: block` 和 `prefix_first` 会明确报错，而非被静默忽略；旧配置中的这些规则需要删除。策略格式版本仍为 `schema_version: 1`。
+匹配器必须使用非空字符串**列表**，即使只有一个 token。`argv_first: [git]` 会匹配所有参数完整且静态的 Git 子命令，包括可能修改数据的操作。可执行文件检查仍然适用，而 `argv_first: ['/usr/bin/git']` 这类宽泛规则在符合条件的系统上可能自动批准修改操作。优先使用 `argv_exact` 限制允许的参数。未知字段、多个匹配字段、空列表和非字符串值都会在加载时被拒绝。请移除使用 `effect: block` 或 `prefix_first` 的旧规则。策略格式版本仍为 `schema_version: 1`。
 
 ### 鉴权语义
 

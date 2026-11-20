@@ -512,8 +512,8 @@ def shell_argv_may_access_sensitive_data(argv: tuple[str, ...], *, shell_name: s
         if target_may_access_sensitive_data(token):
             return True
         if shell_name in {"powershell", "pwsh", "git_bash"}:
-            # Account for Windows path suffixes including alternate data streams.
-            normalized = "/".join(part.partition(":")[0].rstrip(" .") for part in re.split(r"[/\\]", token))
+            # A drive prefix, provider qualifier or stream suffix may border a path component.
+            normalized = "/".join(part.rstrip(" .") for part in re.split(r"[/:\\]", token))
             if target_may_access_sensitive_data(normalized):
                 return True
     return shell_command_may_access_sensitive_data(" ".join(argv), shell_name=shell_name)
