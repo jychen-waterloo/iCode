@@ -510,14 +510,14 @@ class ApprovalMiddleware(FunctionMiddleware):
                     tool_order=tool_order,
                 )
             )
+            token = None
             if tool_name in ADAPTED_DIALECTS:
                 token = isolated_shell_call.set((tool_name, context.arguments["command"]))
-                try:
-                    await call_next()
-                finally:
-                    isolated_shell_call.reset(token)
-            else:
+            try:
                 await call_next()
+            finally:
+                if token is not None:
+                    isolated_shell_call.reset(token)
             return
 
         # Auto-approve safe read-only shell commands (e.g. ls, cat, grep)
