@@ -30,6 +30,7 @@ import os
 import struct
 import sys
 import time
+from base64 import b64encode
 from collections import deque
 from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
@@ -286,7 +287,7 @@ def _pipefail_args(shell: ShellInfo) -> tuple[str, ...]:
 
 
 def _shell_argv_variants(
-    shell: ShellInfo, command: str, *, startup_args: tuple[str, ...] = ()
+    shell: ShellInfo, command: str, *, startup_args: tuple[str, ...] = (), shell_args: tuple[str, ...] | None = None
 ) -> list[tuple[str, ...]]:
     """Launch argvs to try in order: traced first (when armed), then bare.
 
@@ -296,7 +297,13 @@ def _shell_argv_variants(
     variant must degrade to the bare one: tracing may never change
     user-visible shell behavior.
     """
-    base = (shell.path, *startup_args, *_pipefail_args(shell), *shell.args, command)
+    base = (
+        shell.path,
+        *startup_args,
+        *_pipefail_args(shell),
+        *(shell.args if shell_args is None else shell_args),
+        command,
+    )
     prefix = shell_trace_argv.get()
     if prefix:
         return [(*prefix, *base), base]
@@ -330,9 +337,18 @@ def _shell_launch(
         payload = _prepare_pipe_command(command, shell) if pipe else command
         return _shell_argv_variants(shell, payload), build_shell_subprocess_env()
     approved.require_launch(shell.name, command)
+    if shell.name in {"pwsh", "powershell"}:
+        if shell.args not in (["-NoProfile", "-Command"], ["-Command"], ["-c"]):
+            raise ApprovalInvalidatedError("The configured shell arguments changed after structured approval.")
+        encoded = b64encode(command.encode("utf-16-le")).decode("ascii")
+        return (
+            _shell_argv_variants(shell, encoded, shell_args=("-NoProfile", "-NonInteractive", "-EncodedCommand")),
+            approved.environment,
+        )
     if shell.args != ["-c"]:
         raise ApprovalInvalidatedError("The configured shell arguments changed after structured approval.")
-    return _shell_argv_variants(shell, command, startup_args=("--noprofile", "--norc")), approved.environment
+    startup = ("-f", "-d", "-o", "noaliases") if shell.name == "zsh" else ("--noprofile", "--norc")
+    return _shell_argv_variants(shell, command, startup_args=startup), approved.environment
 
 
 _READ_CHUNK_BYTES = 64 * 1024

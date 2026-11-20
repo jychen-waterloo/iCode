@@ -14,6 +14,7 @@ from typing import Any
 from chrys.foundation.platform.runtime_paths import build_shell_subprocess_env
 
 _BASH_DIALECTS = frozenset({"bash", "git_bash"})
+_POWERSHELL_DIALECTS = frozenset({"powershell", "pwsh"})
 
 
 class ApprovalInvalidatedError(PermissionError):
@@ -53,6 +54,26 @@ def _trusted_lookup(env: dict[str, str], executables: tuple[str, ...], roots: tu
         return False
 
 
+def _powershell_applications(env: dict[str, str], executables: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Require native commands to resolve before PowerShell can try module discovery."""
+    applications = []
+    directories = env.get("PATH", "").split(os.pathsep)
+    try:
+        for word in dict.fromkeys(executables):
+            if not word.lower().endswith(".exe"):
+                continue
+            candidates = [Path(word)] if "/" in word or "\\" in word else [Path(d) / word for d in directories]
+            for path in candidates:
+                if path.is_file() and os.access(path, os.X_OK):
+                    applications.append(str(path.resolve(strict=True)))
+                    break
+            else:
+                return None
+    except OSError, ValueError, RuntimeError:
+        return None
+    return tuple(applications)
+
+
 @dataclass(slots=True)
 class ApprovedShell:
     dialect: str
@@ -62,6 +83,7 @@ class ApprovedShell:
     locations: tuple[str, ...] = ()
     roots: tuple[str, ...] = ()
     executables: tuple[str, ...] = ()
+    native_applications: tuple[str, ...] = ()
     active: bool = True
     claimed: bool = False
     issued: bool = False
@@ -84,6 +106,10 @@ class ApprovedShell:
             or not _trusted_lookup(self.environment, self.executables, self.roots)
         ):
             raise ApprovalInvalidatedError("The structured approval no longer binds this shell launch.")
+        if dialect in _POWERSHELL_DIALECTS and (
+            _powershell_applications(self.environment, self.executables) != self.native_applications
+        ):
+            raise ApprovalInvalidatedError("PowerShell executable resolution changed after structured approval.")
         self.issued = True
 
 
@@ -92,19 +118,27 @@ def prepare_shell(
 ) -> ApprovedShell | None:
     """Compute shared Shadow and Enforce eligibility without running a shell."""
     owner = asyncio.current_task()
-    if owner is None or dialect not in _BASH_DIALECTS:
+    if owner is None or dialect not in _BASH_DIALECTS | _POWERSHELL_DIALECTS | {"zsh"}:
         return None
     env = build_shell_subprocess_env()
+    powershell = dialect in _POWERSHELL_DIALECTS
+    native = _powershell_applications(env, executables) if powershell else ()
+    if native is None:
+        return None
+    module_path = env.get("PSMODULEPATH" if os.name == "nt" else "PSModulePath")
     locations = (
         *env.get("PATH", "").split(os.pathsep),
-        *(word for word in executables if "/" in word or "\\" in word),
+        *(module_path.split(os.pathsep) if powershell and module_path is not None else ()),
+        *native,
+        *(word for word in executables if not powershell and ("/" in word or "\\" in word)),
     )
     if not _trusted_locations(locations, roots) or not _trusted_lookup(env, executables, roots):
         return None
-    for key in tuple(env):
-        if key in {"BASH_ENV", "ENV"} or key.startswith("BASH_FUNC_"):
-            del env[key]
-    return ApprovedShell(dialect, source, owner, env, locations, roots, executables)
+    if dialect in _BASH_DIALECTS:
+        for key in tuple(env):
+            if key in {"BASH_ENV", "ENV"} or key.startswith("BASH_FUNC_"):
+                del env[key]
+    return ApprovedShell(dialect, source, owner, env, locations, roots, executables, native)
 
 
 isolated_shell_call: ContextVar[ApprovedShell | None] = ContextVar("prejudge_isolated_shell_call", default=None)
