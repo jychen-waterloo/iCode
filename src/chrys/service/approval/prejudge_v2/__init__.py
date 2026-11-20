@@ -24,6 +24,7 @@ from chrys.service.approval.safety_classifier import (
     shell_command_may_access_sensitive_data,
 )
 
+from ._adapters import ADAPTED_DIALECTS, analyze_adapted, explicit_executable
 from ._analysis import Analysis as Analysis
 from ._analysis import CommandNode as CommandNode
 from ._analysis import covered
@@ -112,7 +113,9 @@ _OPAQUE = frozenset(
         "builtin",
         "cd",
         "chrt",
+        "cmd",
         "command",
+        "cscript",
         "dash",
         "doas",
         "declare",
@@ -122,10 +125,13 @@ _OPAQUE = frozenset(
         "exec",
         "export",
         "find",
+        "fish",
         "getopts",
         "hash",
         "history",
         "ionice",
+        "invoke-expression",
+        "ksh",
         "let",
         "mapfile",
         "nice",
@@ -133,7 +139,9 @@ _OPAQUE = frozenset(
         "open",
         "osascript",
         "popd",
+        "powershell",
         "pushd",
+        "pwsh",
         "read",
         "readarray",
         "readonly",
@@ -151,7 +159,9 @@ _OPAQUE = frozenset(
         "typeset",
         "unalias",
         "unset",
+        "wscript",
         "xargs",
+        "zsh",
     }
 )
 _CONTAINERS = frozenset(
@@ -376,7 +386,7 @@ def _language() -> Any:
 
 
 def analyze(command: str, *, dialect: str = "bash") -> Analysis:
-    if dialect not in _BASH_DIALECTS:
+    if dialect not in _BASH_DIALECTS and dialect not in ADAPTED_DIALECTS:
         return Analysis(False, False, (), ("unsupported_dialect",))
     try:
         data = command.encode("utf-8")
@@ -384,10 +394,14 @@ def analyze(command: str, *, dialect: str = "bash") -> Analysis:
         return Analysis(False, False, (), ("parse_error",))
     if len(data) > 65536:
         return Analysis(False, False, (), ("limit_exceeded",))
-    if _CONTROL.search(data):
+    powershell = dialect in {"powershell", "pwsh"}
+    # Only the PowerShell grammar certifies ordinary CRLF statement separators.
+    if _CONTROL.search(data.replace(b"\r\n", b"\n") if powershell else data):
         return Analysis(False, False, (), ("unsupported_input",))
-    if _ESCAPED_LAYOUT.search(data):
+    if (powershell and b"`" in data) or (not powershell and _ESCAPED_LAYOUT.search(data)):
         return Analysis(False, False, (), ("line_continuation",))
+    if dialect in ADAPTED_DIALECTS:
+        return analyze_adapted(data, dialect=dialect)
     if b'$"' in data:
         return Analysis(False, False, (), ("locale_translation",))
     try:
@@ -554,7 +568,7 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     if policy.mode == "off":
         return PreJudgeResult(Route.DEFER, "off", (), (), policy.policy_id, digest)
     analysis = analyze(command, dialect=dialect)
-    if dialect not in _BASH_DIALECTS:
+    if dialect not in _BASH_DIALECTS and dialect not in ADAPTED_DIALECTS:
         _warn_unsupported_dialect(dialect)
     matched: list[str] = []
     spans: list[tuple[int, int]] = []
@@ -562,6 +576,13 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     reason = analysis.unsupported[0] if analysis.unsupported else "unmatched_unit"
     sensitive = shell_command_may_access_sensitive_data(command, shell_name=dialect)
     for node in analysis.executable_nodes:
+        if dialect in ADAPTED_DIALECTS and node.argv is not None:
+            if _opaque(node.argv):
+                reason = "opaque_carrier"
+                all_allowed = False
+            elif not explicit_executable(node.argv, dialect):
+                reason = "unresolved_executable"
+                all_allowed = False
         allowed = False
         for rule in policy.rules:
             # ALLOW requires complete argv, never only a static prefix.

@@ -53,14 +53,15 @@ _POWERSHELL_ENV_ACCESS_RE = re.compile(
     r"""(?ix)
     (
         (^|[;&|\r\n]\s*)
+        (?:Microsoft\.PowerShell\.Management\\)?
         (?:Get-ChildItem|gci|dir|ls|Get-Item|gi|Get-Content|gc|cat|type)\b
-        (?:(?![;&|]).)*\sEnv:(?:[\w:*?./\\-]+)?
-        (?=$|[\s;&|])
+        (?:(?![;&|]).)*\s['"]?(?:[\w.-]+\\)?(?:Env:|Environment::)
         | \$Env:[A-Za-z_][A-Za-z0-9_]*
         | \$\{Env:[A-Za-z_][A-Za-z0-9_]*\}
     )
     """
 )
+_POWERSHELL_ENV_PROVIDER_RE = re.compile(r"""(?i)(^|[='"\\])(?:env:|environment::)""")
 _SENSITIVE_ENV_NAME_RE = re.compile(
     r"""(?ix)
     (^|_)
@@ -510,6 +511,8 @@ def shell_argv_may_access_sensitive_data(argv: tuple[str, ...], *, shell_name: s
     """Inspect decoded argv in addition to the original shell source."""
     for token in argv:
         if target_may_access_sensitive_data(token):
+            return True
+        if shell_name in {"powershell", "pwsh"} and _POWERSHELL_ENV_PROVIDER_RE.search(token):
             return True
         if shell_name in {"powershell", "pwsh", "git_bash"}:
             # A drive prefix, provider qualifier or stream suffix may border a path component.

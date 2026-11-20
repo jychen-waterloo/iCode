@@ -125,6 +125,8 @@ dev = [
     # versions docs/*/guides/configuration/prejudge.md tells users to install.
     "tree-sitter==0.25.1",
     "tree-sitter-bash==0.25.1",
+    "tree-sitter-pwsh==0.38.1",
+    "tree-sitter-zsh==0.64.3",
 ]
 
 [tool.hatch.build.targets.wheel]

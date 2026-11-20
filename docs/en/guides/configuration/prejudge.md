@@ -1,6 +1,6 @@
 # Structured Shell Pre-Judge
 
-iCode can optionally inspect Bash commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut; DEFER continues through existing approval. Pre-Judge does not deny commands. Existing Hooks, approval policy, the read-only shortcut, DAA (the existing authorization-reuse mechanism), remembered grants, and the **pre-execution** Shell Command Filter retain their existing behavior.
+iCode can optionally inspect Bash, Git Bash, Zsh, and PowerShell commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut; DEFER continues through existing approval. Existing Hooks, approval policy, the read-only shortcut, DAA (the existing authorization-reuse mechanism), remembered grants, and the **pre-execution** Shell Command Filter retain their existing behavior.
 
 Place `prejudge.yaml` in iCode's trusted user configuration directory (`~/.chrys/prejudge.yaml` on macOS/Linux). The user policy applies across profiles and workspaces using that configuration directory.
 
@@ -38,7 +38,7 @@ A structured ALLOW requires **every executable AST node** to match an ALLOW rule
 
 Use `mode: "off"`, `mode: "shadow"`, or `mode: "enforce"`. Unquoted `mode: off` (parsed by YAML as `False`), `mode: false`, and an empty file also disable the feature without loading Tree-sitter. `shadow` logs proposed ALLOW/DEFER decisions without acting on them; `enforce` applies eligible ALLOW shortcuts. Malformed YAML **syntax** raises a path-qualified error at ordinary approval startup, even if the intended mode was `shadow`. Parseable `shadow` YAML with invalid rules or dependencies instead warns (with the file path and rule ID where applicable) and disables observation. Invalid `enforce` rules fail with the file path and rule ID. A BYPASS run does not load or validate `prejudge.yaml`; if approval mode later changes to MANUAL/AUTO, the policy is loaded then.
 
-The **AST matchers** support only Bash / Git Bash. Unsupported shells (zsh, sh, dash, PowerShell, cmd.exe), redirections, dynamic expansions, globs, and most control-flow constructs DEFER. The unsupported-dialect warning states that structured ALLOW is inactive and that the existing read-only shortcut still applies. For example, zsh `ls` and PowerShell `Get-ChildItem` retain their existing read-only approval. Matching uses literal command words without normalizing executable paths: a rule for `rm` does not match `/bin/rm`. Opaque wrappers such as `command`, `env` and `time` also DEFER to existing approval. Pre-Judge is an approval shortcut, not a shell security boundary.
+The AST matchers support static commands, supported pipelines, and independent commands in the dialects listed below. Unsupported shells such as `sh`, `dash`, `fish`, and `cmd.exe`, redirections, dynamic expansions, globs, and most control-flow constructs DEFER. Matching compares literal argv case-sensitively, including under PowerShell. Opaque wrappers such as `command`, `env`, and `time` also DEFER.
 
 ### Install the optional parser
 
@@ -47,16 +47,24 @@ Install the pinned packages into the Python 3.14 environment that runs iCode. Th
 | Installation | Command |
 | --- | --- |
 | Source checkout | `uv sync --locked`, then `uv run icode` |
-| uv tool | `uv tool install --reinstall --python 3.14 --with tree-sitter==0.25.1 --with tree-sitter-bash==0.25.1 iCode-TUI` |
-| pipx, after installing iCode-TUI | `pipx inject iCode-TUI "tree-sitter==0.25.1" "tree-sitter-bash==0.25.1"` |
+| uv tool | `uv tool install --reinstall --python 3.14 --with tree-sitter==0.25.1 --with tree-sitter-bash==0.25.1 --with tree-sitter-zsh==0.64.3 --with tree-sitter-pwsh==0.38.1 iCode-TUI` |
+| pipx, after installing iCode-TUI | `pipx inject iCode-TUI "tree-sitter==0.25.1" "tree-sitter-bash==0.25.1" "tree-sitter-zsh==0.64.3" "tree-sitter-pwsh==0.38.1"` |
 
-To verify the pins, run `python -c "from importlib.metadata import version; print(version('tree-sitter'), version('tree-sitter-bash'))"` in that environment. In a source checkout use `uv run python`. For a uv tool installation, `uv tool dir` locates the `icode-tui` environment. For pipx use `pipx runpip iCode-TUI show tree-sitter tree-sitter-bash`. For a wheel installation, install the parser pins into the same environment as the wheel. Use a managed Python installation when an offline binary has no supported way to install the parsers.
+To verify the pins, run `python -c "from importlib.metadata import version; print([version(p) for p in ('tree-sitter', 'tree-sitter-bash', 'tree-sitter-zsh', 'tree-sitter-pwsh')])"` in that environment. In a source checkout use `uv run python`. For a uv tool installation, `uv tool dir` locates the `icode-tui` environment. For pipx use `pipx runpip iCode-TUI show tree-sitter tree-sitter-bash tree-sitter-zsh tree-sitter-pwsh`. For a wheel installation, install the parser pins into the same environment as the wheel. Use a managed Python installation when an offline binary has no supported way to install the parsers. An unavailable Zsh or PowerShell grammar causes that dialect to DEFER.
 
 ### Isolated launch
 
-An eligible Bash or Git Bash call runs the original command in the configured shell with `--noprofile --norc`. The child environment drops `BASH_ENV`, `ENV`, and all `BASH_FUNC_*` entries. iCode checks the original text and decoded arguments for sensitive targets. A bare command or a supported pipeline or compound statement can qualify when every command matches a rule.
+The configured shell runs the original approved text. iCode checks the original text and decoded arguments for sensitive targets. Every command in a supported pipeline or compound statement must match a rule.
 
-Ordinary approval and BYPASS retain their normal launch settings. A command using an inherited Bash function or startup script can behave differently when the structured shortcut is used. The shortcut trusts system startup state and the user-supplied environment and executables, including `PATH`. Relative lookup entries and executable locations inside the known workspace DEFER. Keep trusted programs and search directories outside locations the agent can change. Inherited state and external programs can change independently of the tool call. Opaque carriers such as `open`, `osascript`, and shell builtins that change execution state DEFER even if a broad rule matches.
+| Shell | Isolation and supported command names |
+| --- | --- |
+| Bash / Git Bash | `--noprofile --norc`. The child environment drops `BASH_ENV`, `ENV`, and all `BASH_FUNC_*` entries. Bare names can qualify. |
+| Zsh | `-f -d -o noaliases`. Bare names can qualify. The trusted system `zshenv` still runs and can control startup settings. |
+| Windows PowerShell 5.1 and PowerShell 7+ | `-NoProfile -NonInteractive`. The source is passed unchanged through `-EncodedCommand`. A resolvable native `.exe` or a supported module-qualified cmdlet can qualify. |
+
+PowerShell examples include `git.exe status` and `Microsoft.PowerShell.Management\Get-ChildItem`. Qualified `Get-Item`, `Get-Content`, `Select-Object`, and `Write-Output` are also supported from their Microsoft modules. Unqualified cmdlets, aliases, and `git status` DEFER. PowerShell Environment provider arguments, uncertain native argument quoting, and unresolved applications also DEFER.
+
+Ordinary approval and BYPASS retain their normal launch settings. Identical command text can behave differently when it relies on Bash functions, Zsh startup files that extend `PATH`, or PowerShell modules available in the normal session. The shortcut trusts system startup state, the inherited environment, `PATH`, `PSModulePath`, and the programs and modules they resolve. Relative search entries and recognized executable or module locations inside a known workspace DEFER. Keep trusted search directories and their contents outside locations the agent can change. Programs and modules outside those checks can change independently of the tool call. Opaque carriers such as `open`, `osascript`, and shell builtins that change execution state DEFER even if a broad rule matches.
 
 ### Approval and execution boundaries
 

@@ -225,6 +225,10 @@ own MIT license (Part 4.1):
     (https://github.com/tree-sitter/py-tree-sitter).
   - tree-sitter-bash: Copyright (c) 2017 Max Brunsfeld
     (https://github.com/tree-sitter/tree-sitter-bash).
+  - tree-sitter-zsh: Copyright (c) 2017 Max Brunsfeld
+    (https://github.com/georgeharker/tree-sitter-zsh).
+  - tree-sitter-pwsh: Copyright (c) 2023 Airbus CERT
+    (https://github.com/wharflab/tree-sitter-powershell).
 
 Several packages contain further third-party code, mostly libraries that
 their compiled extensions link statically. Pillow ships the notices of the
