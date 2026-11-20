@@ -39,17 +39,19 @@ from tests.app.tui.screens.main._workflow_support import (
     switch_mode,
     workflow_selection,
 )
-from tests.orchestration.workflows._hosting import make_project, write_workflow
+from tests.orchestration.workflows._hosting import make_workdir, write_workflow
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import click_when_settled, resize_when_settled
 from tests.support.waiting import wait_for
 from tests.support.workflow_workers import python_workflow
 
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
+
 
 async def test_workflow_hides_status_bar_through_run_and_restores_chat_details(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     engine, bus = WorkflowEngine(), EventBus()
     app = make_chrys_app(tmp_path / "sessions", engine=engine, event_bus=bus)
     async with app.run_test(size=(140, 36)) as pilot:
@@ -59,7 +61,7 @@ async def test_workflow_hides_status_bar_through_run_and_restores_chat_details(
         bar.set_tool_info("13 tools · 1 skill")
         bar.clear_status()
         await click_when_settled(pilot, "#status-tool-info")
-        await wait_for(lambda: isinstance(app.screen, RuntimeDetailsDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, RuntimeDetailsDialog) and app.screen.is_mounted, pilot=pilot)
         await pilot.press("escape")
         await wait_for(lambda: app.screen is main, pilot=pilot)
 
@@ -119,11 +121,11 @@ async def test_workflow_hides_status_bar_through_run_and_restores_chat_details(
         assert str(bar.query_one("#status-flash-trail", Static).content) == "7 tools · 2 skills"
         bar.clear_status()
         await click_when_settled(pilot, "#status-tool-info")
-        await wait_for(lambda: isinstance(app.screen, RuntimeDetailsDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, RuntimeDetailsDialog) and app.screen.is_mounted, pilot=pilot)
 
 
 async def test_app_mode_and_workflow_are_separate_menus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     async with app.run_test(size=(100, 32)) as pilot:
         main = app._main_screen
@@ -132,11 +134,11 @@ async def test_app_mode_and_workflow_are_separate_menus(tmp_path: Path, monkeypa
         assert str(badge.content) == " APP MODE: Chat "
         assert badge.region.width == len(str(badge.content))
         assert main._suggestions.dispatch_slash_command("/help")
-        await wait_for(lambda: isinstance(app.screen, GuideDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, GuideDialog) and app.screen.is_mounted, pilot=pilot)
         await pilot.press("escape")
         await wait_for(lambda: app.screen is main, pilot=pilot)
         await pilot.press("f8")
-        await wait_for(lambda: isinstance(app.screen, GuideDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, GuideDialog) and app.screen.is_mounted, pilot=pilot)
         await pilot.press("escape")
         await wait_for(lambda: app.screen is main, pilot=pilot)
         await click_when_settled(pilot, badge)
@@ -165,7 +167,9 @@ async def test_app_mode_and_workflow_are_separate_menus(tmp_path: Path, monkeypa
         await click_when_settled(pilot, "#workflow-new")
         await wait_for(
             lambda: (
-                isinstance(app.screen, WorkflowPickerDialog) and len(main._workflow.browser._picker.selection.rows) == 1
+                isinstance(app.screen, WorkflowPickerDialog)
+                and app.screen.is_mounted
+                and len(main._workflow.browser._picker.selection.rows) == 1
             ),
             pilot=pilot,
         )
@@ -180,7 +184,7 @@ async def test_app_mode_and_workflow_are_separate_menus(tmp_path: Path, monkeypa
 
 
 async def test_workflow_frame_and_controls_center_after_resize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     monkeypatch.setattr(tui_i18n, "persist_locale", lambda _locale: None)
     write_workflow(
@@ -357,7 +361,7 @@ async def test_workflow_frame_and_controls_center_after_resize(tmp_path: Path, m
 async def test_workflow_sidebar_hides_chat_tabs_and_restores_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chat_tab: str
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     monkeypatch.setattr(tui_i18n, "persist_locale", lambda _locale: None)
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     async with app.run_test(size=(120, 36)) as pilot:
@@ -396,7 +400,7 @@ async def test_workflow_sidebar_hides_chat_tabs_and_restores_selection(
 async def test_slow_source_read_does_not_switch_back_to_code_tab(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     write_workflow(project, "tabs", python_workflow("def fn(value):\n    return value\n", "fn"))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
@@ -433,7 +437,7 @@ async def test_slow_source_read_does_not_switch_back_to_code_tab(
 async def test_a_workflow_title_is_shown_without_terminal_controls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     write_workflow(
         project, "esc", python_workflow("def fn(value):\n    return value\n", "fn", title="Review\x1b[2JInjected")

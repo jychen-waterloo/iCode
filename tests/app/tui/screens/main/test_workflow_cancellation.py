@@ -19,19 +19,21 @@ from chrys.foundation.events import types as events
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.models.execution import ExecutionSnapshot
 from chrys.foundation.models.invocations import InvocationOrigin
-from tests.orchestration.workflows._hosting import make_project
+from tests.orchestration.workflows._hosting import make_workdir
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import title_runs
 from tests.support.waiting import wait_for
 
 from ._workflow_support import WorkflowEngine, confirm_workflow_cancel, open_workflow
 
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
+
 
 @pytest.mark.parametrize("detail_open", [True, False])
 async def test_stop_settles_node_process_and_rejects_late_activity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detail_open: bool
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     bus, engine = EventBus(), WorkflowEngine()
     app = make_chrys_app(tmp_path / "sessions", engine=engine, event_bus=bus)
     async with app.run_test(size=(120, 45)) as pilot:
@@ -85,7 +87,11 @@ async def test_stop_settles_node_process_and_rejects_late_activity(
         if detail_open:
             main._workflow.session_view.open_node(running.node_id)
             await wait_for(
-                lambda: isinstance(app.screen, WorkflowNodeDialog) and bool(app.screen.query(TabbedContent)),
+                lambda: (
+                    isinstance(app.screen, WorkflowNodeDialog)
+                    and app.screen.is_mounted
+                    and bool(app.screen.query(TabbedContent))
+                ),
                 pilot=pilot,
             )
             dialog = app.screen
@@ -137,7 +143,12 @@ async def test_stop_settles_node_process_and_rejects_late_activity(
         if not detail_open:
             main._workflow.session_view.open_node(running.node_id)
         await wait_for(
-            lambda: isinstance(app.screen, WorkflowNodeDialog) and bool(app.screen.query(TabbedContent)), pilot=pilot
+            lambda: (
+                isinstance(app.screen, WorkflowNodeDialog)
+                and app.screen.is_mounted
+                and bool(app.screen.query(TabbedContent))
+            ),
+            pilot=pilot,
         )
         dialog = app.screen
         assert isinstance(dialog, WorkflowNodeDialog)
@@ -173,7 +184,12 @@ async def test_stop_settles_node_process_and_rejects_late_activity(
         await wait_for(lambda: app.screen is main, pilot=pilot)
         main._workflow.session_view.open_node(running.node_id)
         await wait_for(
-            lambda: isinstance(app.screen, WorkflowNodeDialog) and bool(app.screen.query(TabbedContent)), pilot=pilot
+            lambda: (
+                isinstance(app.screen, WorkflowNodeDialog)
+                and app.screen.is_mounted
+                and bool(app.screen.query(TabbedContent))
+            ),
+            pilot=pilot,
         )
         await wait_for(lambda: bool(app.screen.query(InterruptedMessage)), pilot=pilot)
         assert app.screen.query_one(ToolGroup).all_complete

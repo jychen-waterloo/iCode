@@ -18,7 +18,7 @@ from chrys.app.tui.widgets.workflow.graph import WorkflowGraph
 from chrys.foundation.config.settings import Settings
 from chrys.foundation.events.bus import EventBus
 from chrys.kernel import Message
-from tests.orchestration.workflows._hosting import make_project
+from tests.orchestration.workflows._hosting import make_workdir
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import click_when_settled
 from tests.support.waiting import wait_for
@@ -26,12 +26,14 @@ from tests.support.workflow_history import record_workflow_run
 
 from ._workflow_support import WorkflowEngine, save_workflow_session, select_workflow_view, switch_mode
 
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
+
 
 @pytest.mark.parametrize("locale", ["en", "zh-Hans"])
 async def test_session_modes_and_archived_workflow_restore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locale: str
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     bus = EventBus()
     app = make_chrys_app(
@@ -70,7 +72,10 @@ async def test_session_modes_and_archived_workflow_restore(
             else:
                 await save_workflow_session(store, session_id, project)
         await pilot.press("f1")
-        await wait_for(lambda: isinstance(app.screen, SessionsScreen) and not app.screen._loading, pilot=pilot)
+        await wait_for(
+            lambda: isinstance(app.screen, SessionsScreen) and app.screen.is_mounted and not app.screen._loading,
+            pilot=pilot,
+        )
         browser = app.screen
         assert isinstance(browser, SessionsScreen)
         assert {row.meta.session_id for row in browser._rows} == {chat_id}
@@ -87,7 +92,10 @@ async def test_session_modes_and_archived_workflow_restore(
         await pilot.press("escape")
         await switch_mode(main, pilot)
         await pilot.press("f1")
-        await wait_for(lambda: isinstance(app.screen, SessionsScreen) and not app.screen._loading, pilot=pilot)
+        await wait_for(
+            lambda: isinstance(app.screen, SessionsScreen) and app.screen.is_mounted and not app.screen._loading,
+            pilot=pilot,
+        )
         browser = app.screen
         assert isinstance(browser, SessionsScreen)
         assert str(browser.query_one("#container").border_title) == (
@@ -115,7 +123,12 @@ async def test_session_modes_and_archived_workflow_restore(
         await wait_for(lambda: len(browser._rows) == 1, pilot=pilot)
         await click_when_settled(pilot, browser.query_one("#delete", Button))
         await wait_for(
-            lambda: isinstance(app.screen, ConfirmDialog) and bool(app.screen.query("#confirm-yes")), pilot=pilot
+            lambda: (
+                isinstance(app.screen, ConfirmDialog)
+                and app.screen.is_mounted
+                and bool(app.screen.query("#confirm-yes"))
+            ),
+            pilot=pilot,
         )
         await click_when_settled(pilot, "#confirm-yes")
         await wait_for(lambda: not store.session_dir(mixed_id).exists() and not browser._loading, pilot=pilot)
@@ -146,7 +159,7 @@ async def test_session_modes_and_archived_workflow_restore(
         graph.focus()
         assert not graph.selected_node
         await pilot.press("j", "enter")
-        await wait_for(lambda: isinstance(app.screen, WorkflowNodeDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, WorkflowNodeDialog) and app.screen.is_mounted, pilot=pilot)
         await pilot.press("escape")
         await switch_mode(main, pilot)
         assert main.query_one(ChatPanel).session_id == chat_id_before

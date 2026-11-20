@@ -19,6 +19,7 @@ from textual.pilot import Pilot
 from textual.selection import Selection
 from textual.widgets import Static, TabPane
 
+from chrys.app.tui.clipboard import wait_for_clipboard
 from chrys.app.tui.i18n import LocaleController
 from chrys.app.tui.screens.dialogs.tool_view import _COPY_HINT, _NO_INPUT, ToolDetailModal
 from chrys.app.tui.widgets.chat.agent_transcript_surface import (
@@ -150,7 +151,7 @@ async def _wait_for_tool_view(pilot: Pilot[None], *, timeout: float = 5.0) -> To
 
     def content_ready() -> bool:
         screen = pilot.app.screen
-        if not isinstance(screen, ToolDetailModal):
+        if not isinstance(screen, ToolDetailModal) or not screen.is_mounted:
             return False
         views = screen.query(ToolViewContent)
         return bool(views) and all(view.children for view in views)
@@ -250,7 +251,7 @@ async def test_tool_view_modal_stacks_nested_tool_detail_and_returns_to_parent()
 
         def nested_modal_mounted() -> bool:
             screen = pilot.app.screen
-            if screen is outer or not isinstance(screen, ToolDetailModal):
+            if screen is outer or not isinstance(screen, ToolDetailModal) or not screen.is_mounted:
                 return False
             if len(screen.query(ToolViewContent)) != 2:
                 return False
@@ -559,7 +560,7 @@ async def test_running_sub_agent_tool_view_disables_whole_payload_copy(monkeypat
 
         def modal_mounted() -> bool:
             screen = pilot.app.screen
-            if not isinstance(screen, ToolDetailModal):
+            if not isinstance(screen, ToolDetailModal) or not screen.is_mounted:
                 return False
             mounted[:] = [screen]
             return bool(screen.query(AgentTranscriptSurface))
@@ -982,6 +983,7 @@ async def test_modal_right_click_copies_selected_text(monkeypatch: pytest.Monkey
             )
             await pilot.pause()
 
+        await wait_for_clipboard(pilot.app)
         assert copied == ["the result"]
         assert pilot.app.clipboard == "the result"
         assert modal.get_selected_text() is None

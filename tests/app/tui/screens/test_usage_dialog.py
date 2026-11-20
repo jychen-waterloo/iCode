@@ -14,6 +14,7 @@ import pytest
 from rich.cells import cell_len
 from rich.style import Style
 from textual.app import App, ComposeResult
+from textual.events import Key
 from textual.widgets import Button, Static, Tab, TabbedContent, TextArea
 from textual.widgets._tabbed_content import ContentTabs
 
@@ -29,7 +30,6 @@ from chrys.app.tui.screens.dialogs.usage import (
     _heat_level,
     _model_time,
     _MonthGrid,
-    _project_labels,
     _RangeTabs,
     _share_bar,
     _tokens,
@@ -37,6 +37,7 @@ from chrys.app.tui.screens.dialogs.usage import (
     _TrendColumn,
     _UsageRows,
     _week_columns,
+    _workdir_labels,
 )
 from chrys.app.tui.screens.main.screen import MainScreen
 from chrys.app.tui.widgets.chat.messages import AgentMessage, UserMessage
@@ -83,7 +84,7 @@ def _call(day: date = _TODAY, **overrides: Any) -> UsageCall:
         "model": "model-a",
         "profile": "",
         "source": "main",
-        "project": "/w/alpha",
+        "workdir": "/w/alpha",
         "new_input": 1000,
         "cache_read": 3000,
         "output": 200,
@@ -114,7 +115,7 @@ def _report(*calls: UsageCall, today: date = _TODAY, unreadable: int = 0) -> Usa
 def _sample_report() -> UsageReport:
     return _report(
         _call(),
-        _call(_TODAY - timedelta(days=1), model="model-b", source="sub_agent", project="/w/beta", new_input=9000),
+        _call(_TODAY - timedelta(days=1), model="model-b", source="sub_agent", workdir="/w/beta", new_input=9000),
         _call(_TODAY - timedelta(days=40), new_input=50_000, source="title_gen"),
     )
 
@@ -509,9 +510,11 @@ async def test_the_trend_and_group_buttons_choose_by_click() -> None:
         await click_when_settled(pilot, dialog.query_one("#usage-trend-weekly", _ChoiceButton))
         await wait_for(lambda: _chosen(dialog, "usage-trend") == "Weekly", pilot=pilot, description="weekly")
 
-        await click_when_settled(pilot, dialog.query_one("#usage-group-project", _ChoiceButton))
-        await wait_for(lambda: _chosen(dialog, "usage-groups") == "Project", pilot=pilot, description="project")
-        assert _headers(dialog)[0] == "Project"
+        await click_when_settled(pilot, dialog.query_one("#usage-group-working-dir", _ChoiceButton))
+        await wait_for(
+            lambda: _chosen(dialog, "usage-groups") == "Working directory", pilot=pilot, description="workdir"
+        )
+        assert _headers(dialog)[0] == "Working directory"
         assert _row_names(dialog) == ["beta", "alpha"]
 
 
@@ -642,6 +645,19 @@ async def test_by_the_week_a_month_or_30_days_shows_only_the_weeks_of_the_range(
         assert _text(dialog, "usage-peak") == "peak 3.00M"
 
 
+async def test_a_trend_chosen_right_after_a_range_key_keeps_to_the_new_range() -> None:
+    report = _report(_call(date(2026, 10, 2), new_input=3_000_000, output=0), _call(new_input=1_000_000, output=0))
+    async with _HostApp().run_test(size=(100, 30)) as pilot:
+        dialog = await _open(pilot, report)
+        assert (_active_range(dialog), _chosen(dialog, "usage-trend")) == ("This month", "Daily")
+        # Both keys are queued before the tabs' TabActivated for the first can climb to the dialog.
+        dialog.post_message(Key("right", None))
+        dialog.post_message(Key("t", "t"))
+        await pilot.pause()
+
+        assert (_active_range(dialog), _chosen(dialog, "usage-trend")) == ("30 days", "Weekly")
+
+
 async def test_a_month_just_begun_still_shows_all_of_it_by_the_day_and_by_the_week() -> None:
     today = date(2026, 11, 1)
     report = _report(
@@ -751,7 +767,7 @@ async def test_the_groups_list_their_numbers_and_cycle_with_g() -> None:
         assert _row_names(dialog)[0] == "Sub-agent"
 
         await pilot.press("g")
-        assert _chosen(dialog, "usage-groups") == "Project"
+        assert _chosen(dialog, "usage-groups") == "Working directory"
         assert _row_names(dialog)[0] == "beta"
 
         await pilot.press("g")
@@ -895,7 +911,7 @@ async def test_a_day_of_another_year_shows_its_year() -> None:
 
 
 async def test_labels_from_the_logs_stay_literal_and_clean() -> None:
-    report = _report(_call(model="[red]x\x1b[31m[/oops]", project="/w/[bold]p\udcff"))
+    report = _report(_call(model="[red]x\x1b[31m[/oops]", workdir="/w/[bold]p\udcff"))
     async with _HostApp().run_test(size=(100, 30)) as pilot:
         dialog = await _open(pilot, report)
 
@@ -913,7 +929,7 @@ async def test_labels_from_the_logs_stay_literal_and_clean() -> None:
 
 
 async def test_the_unknown_cases_read_as_words() -> None:
-    report = _report(_call(model="", project="", source="new_role"))
+    report = _report(_call(model="", workdir="", source="new_role"))
     async with _HostApp().run_test(size=(100, 30)) as pilot:
         dialog = await _open(pilot, report)
 
@@ -921,13 +937,13 @@ async def test_the_unknown_cases_read_as_words() -> None:
         await pilot.press("g")
         assert _row_names(dialog) == ["new_role"]
         await pilot.press("g")
-        assert _row_names(dialog) == ["Other workspaces"]
+        assert _row_names(dialog) == ["Other working directories"]
         await pilot.press("g")
         assert _row_names(dialog) == ["Other profiles"]
 
 
-def test_project_labels_widen_only_as_far_as_needed() -> None:
-    assert _project_labels(["/a/one", "/a/two", "/b/two", "/x/y/same", "/z/y/same", ""]) == {
+def test_workdir_labels_widen_only_as_far_as_needed() -> None:
+    assert _workdir_labels(["/a/one", "/a/two", "/b/two", "/x/y/same", "/z/y/same", ""]) == {
         "/a/one": "one",
         "/a/two": "a/two",
         "/b/two": "b/two",
@@ -1849,7 +1865,9 @@ async def test_opening_from_a_populated_main_screen_does_not_restyle_recompose_o
             usage_report, "load_usage_report", lambda _store, _cancel, *, profile_names: _sample_report()
         )
         main_screen._config_actions.open_usage()
-        await wait_for(lambda: isinstance(app.screen, UsageDialog), pilot=pilot, description="usage open")
+        await wait_for(
+            lambda: isinstance(app.screen, UsageDialog) and app.screen.is_mounted, pilot=pilot, description="usage open"
+        )
         dialog = app.screen
         assert isinstance(dialog, UsageDialog)
         await wait_for(lambda: "model-b" in _painted(pilot), pilot=pilot, description="usage read")

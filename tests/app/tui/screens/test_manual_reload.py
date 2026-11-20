@@ -26,6 +26,7 @@ from tests.app.tui.screens.test_prompt_shortcut_send import (
     turn_finished,
     type_text,
 )
+from tests.support.toasts import shown_toasts
 from tests.support.waiting import ENGINE_TURN_TIMEOUT, wait_for
 
 pytestmark = pytest.mark.usefixtures("clear_model_profile_env")
@@ -105,7 +106,7 @@ async def test_broken_settings_and_subsequent_repair_leave_chat_usable(agent_eng
             pilot=session.pilot,
             description="settings error shown in a toast",
         )
-        errors = [n for n in session.app._notifications if str(path) in str(n.message)]
+        errors = [n for n in shown_toasts(session.app) if str(path) in str(n.message)]
         assert [n.timeout for n in errors] == [8]
         assert path.read_text(encoding="utf-8") == "ui: [broken"
         await ask_after_reload(session, "after broken settings")
@@ -258,7 +259,11 @@ async def test_manual_model_commits_only_after_success_and_keeps_the_session_mod
         path.write_text(f"model.profile.active: {BROKEN_MODEL}\n", encoding="utf-8")
         await slash_reload(session)
         await wait_for(
-            lambda: session.seen.of(ev.AgentLoadFailed) and isinstance(session.app.screen, AgentLoadDialog),
+            lambda: (
+                session.seen.of(ev.AgentLoadFailed)
+                and isinstance(session.app.screen, AgentLoadDialog)
+                and session.app.screen.is_mounted
+            ),
             pilot=session.pilot,
             description="candidate build failed",
         )
@@ -297,9 +302,9 @@ async def test_reload_reports_applied_deferred_and_conflicting_values_once(agent
     install_process_settings(load_settings())
     async with running_session(agent_engine, tmp_path, monkeypatch) as session:
         warnings = await capture_events(session.bus, ev.Warning)
-        session.engine.settings_handle.override(chat_fold_finished_turns=True)
+        session.engine.settings_handle.override(approval_defer_while_judging=False)
         path.write_text(
-            f"model.profile.active: {MAIN_MODEL}\nui.theme: nord\nui.chat.fold_finished_turns: true\n"
+            f"model.profile.active: {MAIN_MODEL}\nui.theme: nord\nui.approval.defer_while_judging: false\n"
             "notifications.enabled: false\ntrajectory.verify_commands: mycheck\notel.enabled: true\n"
             "agent.default_profile: QA\napproval.default_mode: auto\n",
             encoding="utf-8",
@@ -329,10 +334,10 @@ async def test_reload_reports_applied_deferred_and_conflicting_values_once(agent
         assert all(key in pending for key in ("agent.default_profile", "approval.default_mode"))
 
         path.write_text(
-            path.read_text(encoding="utf-8").replace("fold_finished_turns: true", "fold_finished_turns: false"),
+            path.read_text(encoding="utf-8").replace("defer_while_judging: false", "defer_while_judging: true"),
             encoding="utf-8",
         )
-        assert "ui.chat.fold_finished_turns" in (await reload_report(session))["controls.reload_shadowed"]
+        assert "ui.approval.defer_while_judging" in (await reload_report(session))["controls.reload_shadowed"]
         path.write_text("ui.theme: gone-theme\n", encoding="utf-8")
         lines = await reload_report(session)
         assert get_model_pointer()[0] == ""

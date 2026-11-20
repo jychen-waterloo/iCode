@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime, timedelta
 
@@ -30,6 +31,8 @@ from tests.app.acp._session_manager_fakes import (
     _StaticListStore,
     _unsupported_sse_mcp,
 )
+from tests.support.async_tasks import running_task, wait_for_completion
+from tests.support.waiting import wait_for
 from tests.support.workflow_history import workflow_state
 
 
@@ -265,6 +268,28 @@ async def test_list_sessions_sorts_by_updated_at_descending(tmp_path) -> None:
 
     assert next_cursor is None
     assert [session.session_id for session in sessions] == ["newer", "older"]
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_sorts_naive_and_aware_updated_at(tmp_path) -> None:
+    """session/list ranks a mix of offset-free and offset-aware stamps without raising."""
+    project = tmp_path / "project"
+    project.mkdir()
+    store = JsonFileStateStore(tmp_path / "sessions")
+    for session_id, stamp in (("naive", "2026-09-02T09:30:00"), ("aware", "2026-09-03T09:30:00+00:00")):
+        await store.save_session(session_id, {"messages": [Message("user", ["hi"])]}, primary_cwd=str(project))
+        path = store.session_dir(session_id) / "session.json"
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+        envelope["meta"]["created_at"] = stamp
+        envelope["meta"]["updated_at"] = stamp
+        path.write_text(json.dumps(envelope), encoding="utf-8")
+    manager = _manager(str(project), store)
+
+    sessions, next_cursor = await manager.list_sessions(cwd=str(project), cursor=None)
+
+    assert next_cursor is None
+    assert [session.session_id for session in sessions] == ["aware", "naive"]
+    assert sessions[1].updatedAt == "2026-09-02T09:30:00+00:00"
 
 
 @pytest.mark.asyncio
@@ -660,15 +685,18 @@ async def test_close_waits_for_session_prompt_lock(tmp_path) -> None:
     )
     manager._sessions["s1"] = managed
 
-    async with managed.prompt_lock:
-        task = asyncio.create_task(manager.close("s1"))
-        await asyncio.sleep(0)
-        assert not task.done()
-        assert host.shutdown_called is False
-        with pytest.raises(AcpSessionError, match="not active"):
-            manager.get("s1")
+    async with running_task(manager.close("s1")) as task:
+        async with managed.prompt_lock:
+            await wait_for(lambda: managed.closing or task.done(), description="session marked closing")
+            if task.done():
+                await task
+            assert managed.closing
+            assert not task.done()
+            assert host.shutdown_called is False
+            with pytest.raises(AcpSessionError, match="not active"):
+                manager.get("s1")
 
-    await asyncio.wait_for(task, timeout=1)
+        await wait_for_completion(task)
     assert host.shutdown_called is True
 
 

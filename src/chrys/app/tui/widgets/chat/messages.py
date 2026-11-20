@@ -18,6 +18,7 @@ from rich.cells import cell_len
 from rich.text import Text
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
+from textual.events import Click
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import reactive
@@ -26,7 +27,7 @@ from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, Static
 
-from chrys.app.tui.clipboard import copy_text_to_clipboards
+from chrys.app.tui.clipboard import copy_text_to_clipboards, notify_after_copy
 from chrys.app.tui.copy_messages import COPIED_TITLE
 from chrys.app.tui.i18n import render_str, widget_localizer
 from chrys.app.tui.support.gc_freeze import (
@@ -53,9 +54,10 @@ from chrys.app.tui.widgets.chat.fold_rows import (
     THOUGHT_LABEL,
     text_preview,
 )
+from chrys.app.tui.widgets.chat.guide_fold import GuideFoldMixin, GuideSurfaceMixin
 from chrys.app.tui.widgets.chat.image_preview import extract_image_previews
 from chrys.app.tui.widgets.chat.image_view import TerminalImages
-from chrys.app.tui.widgets.chat.process_visibility import ProcessMember
+from chrys.app.tui.widgets.chat.process_visibility import LiveStatus, ProcessMember
 from chrys.app.tui.widgets.chat.transcript_panel import note_fold
 from chrys.app.tui.widgets.click_affordance import ClickAffordance
 from chrys.app.tui.widgets.loading import component_text_style
@@ -70,6 +72,8 @@ if TYPE_CHECKING:
     from textual.await_complete import AwaitComplete
     from textual.timer import Timer
 
+    from chrys.app.tui.widgets.loading import RunningTitle
+    from chrys.foundation.i18n import MessageDef
     from chrys.foundation.models.invocations import ContentChannel
 
 logger = logging.getLogger(__name__)
@@ -134,6 +138,7 @@ _RETRY_MESSAGE = msg(
 _RETRY_COUNTDOWN = msg("tui.chat.retry_countdown", fallback="Retrying in {seconds}s ({attempt}/{max_attempts})")
 _RETRY_STARTED = msg("tui.chat.retry_started", fallback="Retrying ({attempt}/{max_attempts})...")
 _RETRY_NOW = msg("tui.chat.retry_now", fallback="Retry Now")
+MESSAGE_TIMESTAMP = msg("tui.chat.message_timestamp", fallback="- {hour}:{minute}")
 _RETRY_COUNTDOWN_TICK_SLACK_SECONDS = 0.02
 """How long after the remaining time crosses a whole second the countdown repaints, so it reads the new second."""
 _RETRY_NOW_GAP_CELLS = 2
@@ -180,16 +185,14 @@ def _aware_created_at(value: Any) -> datetime | None:
     return dt
 
 
-def format_message_created_at(value: Any) -> str:
-    """Format a persisted message timestamp in the user's local time."""
+def format_message_created_at(value: Any, resolve_message: Callable[[MessageRef], str] = format_message) -> str:
+    """Format a persisted message timestamp in the user's local time, on a 24-hour clock."""
     dt = _aware_created_at(value)
     if dt is None:
         return ""
 
     local = dt.astimezone()
-    hour = local.hour % 12 or 12
-    suffix = "AM" if local.hour < 12 else "PM"
-    return f"- {hour}:{local.minute:02d} {suffix}"
+    return resolve_message(MESSAGE_TIMESTAMP.bind(hour=f"{local.hour:02d}", minute=f"{local.minute:02d}"))
 
 
 def turn_duration_ms(started_at: Any, finished_at: Any) -> int | None:
@@ -208,10 +211,10 @@ def format_chat_copy_payload(messages: list[tuple[str, str]]) -> str:
     return "\n\n".join(f"[{name}]\n{text}" for name, text in messages)
 
 
-def _user_header_text(*, timestamp: str) -> Text:
-    """The user message header: the ``You`` label and its timestamp."""
+def _user_header_text(*, timestamp: str, label: str) -> Text:
+    """The user message header: its label and its timestamp."""
     header = Text()
-    header.append("\u276f You", style="bold cyan")
+    header.append(f"\u276f {label}", style="bold cyan")
     if timestamp:
         header.append(f" {timestamp}", style="dim")
     return header
@@ -220,13 +223,20 @@ def _user_header_text(*, timestamp: str) -> Text:
 class _UserHeader(Static):
     """Header of a user message."""
 
-    def __init__(self, content: Text) -> None:
+    def __init__(self, content: Text, label: str) -> None:
+        self._copy_label = label
         super().__init__(content, classes="message-header")
+
+    def show(self, content: Text, label: str) -> None:
+        """Refresh both the visible header and its selection label; a new label takes a new width."""
+        relabelled = label != self._copy_label
+        self._copy_label = label
+        self.update(content, layout=relabelled)
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         """Copy the user header as a transcript label, not decorative chrome."""
         _ = selection
-        return "[You]", "\n"
+        return f"[{self._copy_label}]", "\n"
 
 
 class _UserImagePreview(TerminalImages):
@@ -299,6 +309,14 @@ class MessageCopyButton(ClickAffordance):
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         _ = selection
         return None
+
+
+def _relabel_copy_buttons(message: Widget, tooltip: MessageDef) -> None:
+    """Show *message*'s copy action and its *tooltip* in the current language."""
+    localizer = widget_localizer(message)
+    for button in message.query(MessageCopyButton):
+        button.update(Text(render_str(localizer, COPY_MESSAGE_BUTTON.bind())))
+        button.tooltip = render_str(localizer, tooltip.bind())
 
 
 class MessageRollbackButton(ClickAffordance):
@@ -411,7 +429,7 @@ class UserMessage(Widget):
 
     def compose(self) -> ComposeResult:
         with MessageHeaderRow():
-            yield _UserHeader(_user_header_text(timestamp=self._ts))
+            yield _UserHeader(self._header_text(), self._copy_label())
             copy_button = MessageCopyButton(
                 tooltip=self._render_message(_USER_MESSAGE_COPY_TOOLTIP.bind()),
                 text=self._render_message(COPY_MESSAGE_BUTTON.bind()),
@@ -432,6 +450,23 @@ class UserMessage(Widget):
     def text(self) -> str:
         """The message as the user wrote it."""
         return self._text
+
+    def _copy_label(self) -> str:
+        """The label a selection copies."""
+        return "You"
+
+    def _header_text(self) -> Text:
+        """The header it shows: its label and when it was sent."""
+        return _user_header_text(timestamp=self._ts, label=self._copy_label())
+
+    def _refresh_header(self) -> None:
+        with contextlib.suppress(NoMatches):
+            self.query_one(_UserHeader).show(self._header_text(), self._copy_label())
+
+    def refresh_labels(self) -> None:
+        """Show its header and copy action in the current language, in place."""
+        self._refresh_header()
+        _relabel_copy_buttons(self, _USER_MESSAGE_COPY_TOOLTIP)
 
     @property
     def is_injection(self) -> bool:
@@ -512,10 +547,12 @@ class UserMessage(Widget):
         """Copy the message as the user wrote it to the available clipboards."""
         if not self._text.strip():
             return
-        copy_text_to_clipboards(self.app, self._text)
+        dispatched = copy_text_to_clipboards(self.app, self._text)
         localizer = widget_localizer(self)
-        self.notify(
+        notify_after_copy(
+            self,
             render_str(localizer, _USER_MESSAGE_COPIED.bind()),
+            dispatched=dispatched,
             title=render_str(localizer, COPIED_TITLE.bind()),
             timeout=2,
             markup=False,
@@ -543,7 +580,7 @@ class _AgentHeader(Static):
         """Copy the agent header as a transcript label, not decorative chrome."""
         return f"[{self._copy_label}]", "\n"
 
-    def on_click(self) -> None:
+    def on_click(self, event: Click) -> None:
         # A drag across the header ends in a click too; the text it selected stays, and nothing folds.
         if self.screen.selections.get(self) is None:
             self.post_message(self.Clicked())
@@ -676,10 +713,15 @@ class _AgentReplyHeader(_FoldRowHeader):
         """The reply header shown, or None for the fold row."""
         self.set_class(reply is None, "fold-row-header", update=False)
 
-    def show_reply(self, reply: Text) -> None:
-        """Show *reply* as the reply's header; one row, so no layout."""
+    def show_reply(self, reply: Text, label: str) -> None:
+        """Show *reply* as the reply's header; one row, so no layout unless it takes a new width.
+
+        A label in another language, or the time a completed answer learns, changes that width.
+        """
+        resized = self._reply is None or reply.cell_len != self._reply.cell_len
+        self._copy_label = label
         self._reply = reply
-        self.refresh(layout=False)
+        self.refresh(layout=resized)
 
     def show(
         self, *, collapsed: bool, text: str, label: MessageRef | None = None, detail: MessageRef | None = None
@@ -704,7 +746,11 @@ class _AgentReplyHeader(_FoldRowHeader):
         return super().render() if self._reply is None else self._reply
 
 
-class StreamedMarkdownMessage(FoldGap, ProcessMember):
+class _MessageMarkdown(GuideSurfaceMixin, VirtualizedMarkdown):
+    """Markdown whose fold guide takes precedence over body selection."""
+
+
+class StreamedMarkdownMessage(GuideFoldMixin, FoldGap, ProcessMember):
     """A transcript message whose markdown body can stream in.
 
     Holds what streaming needs and what keeps it cheap: the body catches up at
@@ -752,7 +798,7 @@ class StreamedMarkdownMessage(FoldGap, ProcessMember):
 
     def render(self) -> RenderResult:
         # Its header and body cover the rest: only its gap shows its own content.
-        return self.gap_text() if self.gap_above else super().render()
+        return self.gap_render() if self.gap_above or self.gap_below else super().render()
 
     def _builds_body_on_opening(self) -> bool:
         """Whether its body waits for it to open: built folded, it composes none, and a folded body is handed no text.
@@ -778,11 +824,27 @@ class StreamedMarkdownMessage(FoldGap, ProcessMember):
     def _new_body(self) -> VirtualizedMarkdown:
         """The markdown body, built from the current text, for :meth:`compose`."""
         self._body_freeze_epoch = current_gc_freeze_epoch()
-        self._md_widget = VirtualizedMarkdown(self.text)
+        self._md_widget = _MessageMarkdown(self.text)
         self._body_parse = None
         # The body starts from the current text, so a queued sync has nothing to hand it.
         self._body_stale = False
         return self._md_widget
+
+    def guide_surface(self) -> Widget | None:
+        return self._md_widget if folds_with_turn(self) and self._shows_body() else None
+
+    def guide_title(self) -> Widget:
+        return self.query_one(_AgentHeader)
+
+    def can_toggle_from_guide(self) -> bool:
+        return self._is_final or isinstance(self, ThinkingMessage)
+
+    def fold_from_guide(self) -> None:
+        if self.can_toggle_from_guide():
+            self.collapsed = not self.collapsed
+
+    def on__agent_header_clicked(self) -> None:
+        self.fold_from_guide()
 
     def _refresh_header(self) -> None:
         """Show the header as the message's state now reads (collapsed, timestamp)."""
@@ -837,6 +899,9 @@ class StreamedMarkdownMessage(FoldGap, ProcessMember):
         if crop.y < gap:
             gap_lines = Widget.render_lines(self, Region(crop.x, crop.y, crop.width, min(gap, crop.bottom) - crop.y))
             lines[: len(gap_lines)] = gap_lines
+        if self.gap_below and crop.y <= self.size.height - 1 < crop.bottom:
+            y = self.size.height - 1
+            lines[y - crop.y] = Widget.render_lines(self, Region(crop.x, y, crop.width, 1))[0]
         return lines
 
     def _can_reuse_chrome_strip(self) -> bool:
@@ -863,6 +928,7 @@ class StreamedMarkdownMessage(FoldGap, ProcessMember):
 
     def watch_collapsed(self, collapsed: bool) -> None:
         if collapsed:
+            self.clear_guide_hover()
             note_fold(self)
         body = self._md_widget
         if body is not None:
@@ -969,7 +1035,7 @@ class StreamedMarkdownMessage(FoldGap, ProcessMember):
                 # Built empty and handed the text once mounted: built with it, its mount would wait for the text's
                 # parse, and so would its removal. Until then it is no body to hand streamed text to.
                 epoch = current_gc_freeze_epoch()
-                body = VirtualizedMarkdown("")
+                body = _MessageMarkdown("")
                 body.display = False
                 await self.mount(body)
                 self._md_widget = body
@@ -1140,6 +1206,7 @@ class AgentMessage(StreamedMarkdownMessage):
         segment_ids: Iterable[str] = (),
         is_status: bool = False,
         collapsed: bool = False,
+        provisional: bool = False,
     ) -> None:
         self.is_status = is_status
         """Persisted lifecycle prose is not an agent's successful final answer."""
@@ -1151,6 +1218,8 @@ class AgentMessage(StreamedMarkdownMessage):
         self._is_structured_completion = is_structured_completion
         self._ts = timestamp
         self._duration_ms = duration_ms
+        self._provisional = provisional
+        """Streamed while its turn's process folds: its header stays muted until the text is known to be the answer."""
         cls = ""
         if is_intermediate:
             cls = "--intermediate"
@@ -1192,7 +1261,8 @@ class AgentMessage(StreamedMarkdownMessage):
     def _header_text(self) -> Text:
         label = self._copy_label()
         arrow = FOLDED_ARROW if self.collapsed else OPEN_ARROW
-        t = Text.assemble((f"{arrow} {label}", "bold green"))
+        style = "bold dim" if self._provisional and not self._is_final else "bold green"
+        t = Text.assemble((f"{arrow} {label}", style))
         if self._ts:
             t.append(f" {self._ts}", style="dim")
         if self._duration_ms is not None:
@@ -1230,14 +1300,17 @@ class AgentMessage(StreamedMarkdownMessage):
             if self._is_intermediate:
                 header.show(collapsed=self.collapsed, text=self._source_text)
             else:
-                header.show_reply(self._header_text())
+                header.show_reply(self._header_text(), self._copy_label())
+
+    def refresh_labels(self) -> None:
+        """Show its header and copy action in the current language, in place."""
+        self._refresh_header()
+        _relabel_copy_buttons(self, _AGENT_RESPONSE_COPY_TOOLTIP)
 
     def _on_final(self) -> None:
+        if self._provisional:
+            self._refresh_header()
         self._show_copy_button_if_ready()
-
-    def on__agent_header_clicked(self) -> None:
-        if self._is_final:
-            self.collapsed = not self.collapsed
 
     def set_timestamp(self, timestamp: str, *, duration_ms: int | None = None) -> None:
         """Update the header timestamp, and how long the turn took to this answer (*duration_ms*) when given."""
@@ -1273,10 +1346,12 @@ class AgentMessage(StreamedMarkdownMessage):
         payload = self.format_agent_response_copy()
         if not payload.strip():
             return
-        copy_text_to_clipboards(self.app, payload)
+        dispatched = copy_text_to_clipboards(self.app, payload)
         localizer = widget_localizer(self)
-        self.notify(
+        notify_after_copy(
+            self,
             render_str(localizer, _AGENT_RESPONSE_COPIED.bind()),
+            dispatched=dispatched,
             title=render_str(localizer, COPIED_TITLE.bind()),
             timeout=2,
             markup=False,
@@ -1307,6 +1382,19 @@ class AgentMessage(StreamedMarkdownMessage):
             self.collapsed = True
         self.stream_update(self._source_text, is_final=True)
         self._refresh_header()
+        self._notify_live_status()
+
+    @property
+    def live_status_animates(self) -> bool:
+        return False
+
+    def live_status(self) -> LiveStatus:
+        preview = text_preview(self._source_text)
+
+        def render(title: RunningTitle, _width: int, _animated: bool) -> Text:
+            return Text(preview, style=title.text_style_of("liveprocessrow--text"))
+
+        return render
 
 
 class ThinkingMessage(StreamedMarkdownMessage):
@@ -1412,20 +1500,21 @@ class ThinkingMessage(StreamedMarkdownMessage):
         else:
             self._progress.note(text, time.monotonic())
             super().stream_update(updated)
+            self._notify_live_status()
 
     def stream_update(self, text: str, is_final: bool = False) -> None:
         if is_final:
             super().stream_update(text, is_final=True)
-            return
-        if self._progress is not None and text.startswith(self._source_text):
+        elif self._progress is not None and text.startswith(self._source_text):
             self._progress.note(text[len(self._source_text) :], time.monotonic())
             super().stream_update(text)
-            return
-        # Replacing the text starts a fresh estimate. The live renderer appends deltas directly.
-        self._progress = StreamTokens()
-        self._progress.note(text, time.monotonic())
-        super().stream_update(text)
-        self._refresh_header()
+        else:
+            # Replacing the text starts a fresh estimate. The live renderer appends deltas directly.
+            self._progress = StreamTokens()
+            self._progress.note(text, time.monotonic())
+            super().stream_update(text)
+            self._refresh_header()
+        self._notify_live_status()
 
     def on_show(self) -> None:
         self._composited = True
@@ -1440,9 +1529,9 @@ class ThinkingMessage(StreamedMarkdownMessage):
         if self._header is not None and is_widget_shown_on_active_screen(self._header):
             self._refresh_header()
 
-    def _progress_detail(self) -> MessageRef | None:
-        progress = self._progress
-        if progress is None or not self._composited or not self.collapsed or not progress.tokens:
+    @staticmethod
+    def _progress_detail(progress: StreamTokens | None) -> MessageRef | None:
+        if progress is None or not progress.tokens:
             return None
         tokens = format_token_count(progress.tokens)
         speed = progress.speed(time.monotonic())
@@ -1466,15 +1555,36 @@ class ThinkingMessage(StreamedMarkdownMessage):
             collapsed=self.collapsed,
             text=self._source_text if self._is_final else "",
             label=self._label_ref(),
-            detail=self._progress_detail(),
+            detail=self._progress_detail(self._progress) if self._composited and self.collapsed else None,
         )
 
     def _on_final(self) -> None:
         self._progress = None
         self._refresh_header()
 
-    def on__agent_header_clicked(self) -> None:
-        self.collapsed = not self.collapsed
+    @property
+    def live_status_animates(self) -> bool:
+        return self._progress is not None
+
+    def live_status(self) -> LiveStatus:
+        label_ref = self._label_ref()
+        progress = self._progress
+        frozen_detail = self._progress_detail(progress)
+        preview = text_preview(self._source_text) if self._is_final else ""
+
+        def render(title: RunningTitle, _width: int, animated: bool) -> Text:
+            localizer = widget_localizer(title)
+            label = render_str(localizer, label_ref)
+            style = title.text_style_of("liveprocessrow--thought")
+            detail = self._progress_detail(progress) if animated else frozen_detail
+            if detail is not None:
+                return Text.assemble((label, style), render_str(localizer, detail))
+            if preview:
+                prefix = render_str(localizer, FOLDED_LABEL.bind(label=label))
+                return Text.assemble((prefix, style), preview)
+            return Text(label, style=style)
+
+        return render
 
 
 def folds_with_turn(widget: Widget) -> TypeGuard[ThinkingMessage | AgentMessage]:

@@ -37,7 +37,7 @@ from chrys.service.workflows.scheduler import AttemptRef
 from chrys.service.workflows.store import DATA_DROPPED_KEY, node_value_path
 from chrys.service.workflows.transcript import NodeTranscript, NodeUsage, read_node_transcript
 from tests.app.tui.screens.main._workflow_support import workflow_selection
-from tests.orchestration.workflows._hosting import make_project, write_workflow
+from tests.orchestration.workflows._hosting import make_workdir, write_workflow
 from tests.support.secure_files import plant_owner_only_bytes
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import BusyWidget, click_when_settled
@@ -54,6 +54,8 @@ from ._workflow_support import (
     value_text,
     value_texts,
 )
+
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
 
 
 async def test_node_record_completion_during_shutdown_does_not_update_widgets(
@@ -201,7 +203,7 @@ async def test_value_tabs_switch_only_their_own_pane_by_click_or_key(tmp_path: P
 async def test_closing_node_details_cancels_record_read_before_widgets_are_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     read_started, release_read, read_finished = Event(), Event(), Event()
 
@@ -255,7 +257,7 @@ async def test_shutdown_while_node_tabs_mount(
 
     from chrys.app.tui.widgets.workflow.projector import WorkflowProjector
 
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     original_add = Tabs.add_tab
     stopped = False
@@ -310,7 +312,7 @@ async def test_shutdown_starts_before_node_screen_detaches(tmp_path: Path, monke
 
     from chrys.app.tui.widgets.workflow.projector import WorkflowProjector
 
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     ready, shutting_down, validated = asyncio.Event(), asyncio.Event(), asyncio.Event()
     original_add, original_close = Tabs.add_tab, app._close_all
@@ -370,7 +372,7 @@ async def test_closing_node_details_while_its_tabs_mount(tmp_path: Path, monkeyp
 
     from chrys.app.tui.widgets.workflow.projector import WorkflowProjector
 
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     original_add = Tabs.add_tab
     added = asyncio.Event()
@@ -565,7 +567,7 @@ async def test_large_graph_list_uses_same_keyboard_and_click_details(
 ) -> None:
     from chrys.app.tui.widgets.workflow import graph as graph_module
 
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     async with app.run_test(size=(120, 45)) as pilot:
         main = app._main_screen
@@ -635,7 +637,7 @@ async def test_large_graph_list_uses_same_keyboard_and_click_details(
         await pilot.click(
             graph, offset=(1 + graph.diagram_origin.x, box.y - round(graph.scroll_y) + graph.diagram_origin.y)
         )
-        await wait_for(lambda: isinstance(app.screen, WorkflowNodeDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, WorkflowNodeDialog) and app.screen.is_mounted, pilot=pilot)
         assert isinstance(app.screen, WorkflowNodeDialog) and app.screen.node["id"] == "node190"
 
 
@@ -643,7 +645,7 @@ async def test_large_graph_list_uses_same_keyboard_and_click_details(
 async def test_idle_agent_has_transcript_tab_but_python_and_loop_nodes_do_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locale: str
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine())
     async with app.run_test(size=(120, 45)) as pilot:
         app.locale_controller.switch_locale(locale)
@@ -653,7 +655,11 @@ async def test_idle_agent_has_transcript_tab_but_python_and_loop_nodes_do_not(
         for node_id in ("read_request", "refine", "architecture"):
             main._workflow.session_view.open_node(node_id)
             await wait_for(
-                lambda: isinstance(app.screen, WorkflowNodeDialog) and bool(app.screen.query(TabbedContent)),
+                lambda: (
+                    isinstance(app.screen, WorkflowNodeDialog)
+                    and app.screen.is_mounted
+                    and bool(app.screen.query(TabbedContent))
+                ),
                 pilot=pilot,
             )
             dialog = app.screen
@@ -684,7 +690,7 @@ async def test_node_records_attempts_previous_output_and_transcript(
 
     history_read = create_autospec(workflow_node.latest_node_output, side_effect=workflow_node.latest_node_output)
     monkeypatch.setattr(workflow_node, "latest_node_output", history_read)
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     write_workflow(project, "wf", python_workflow("def fn(value):\n    return value\n", "fn"))
     bus, engine = EventBus(), WorkflowEngine()
@@ -746,7 +752,12 @@ async def test_node_records_attempts_previous_output_and_transcript(
             graph.focus()
             await pilot.press("j", "enter")
             await wait_for(
-                lambda: isinstance(app.screen, WorkflowNodeDialog) and app.screen.selected is not None, pilot=pilot
+                lambda: (
+                    isinstance(app.screen, WorkflowNodeDialog)
+                    and app.screen.is_mounted
+                    and app.screen.selected is not None
+                ),
+                pilot=pilot,
             )
             dialog = app.screen
             assert isinstance(dialog, WorkflowNodeDialog)
@@ -892,7 +903,7 @@ async def test_node_records_attempts_previous_output_and_transcript(
                     box.y + 1 - round(graph.scroll_y) + graph.diagram_origin.y,
                 ),
             )
-            await wait_for(lambda: isinstance(app.screen, WorkflowNodeDialog), pilot=pilot)
+            await wait_for(lambda: isinstance(app.screen, WorkflowNodeDialog) and app.screen.is_mounted, pilot=pilot)
         finally:
             await store.close()
 
@@ -901,7 +912,7 @@ async def test_retry_is_latched_across_dialog_reopen_and_new_attempts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     bus, engine = EventBus(), WorkflowEngine()
     retries: list[events.WorkflowNodeRetryRequest] = []
@@ -932,6 +943,7 @@ async def test_retry_is_latched_across_dialog_reopen_and_new_attempts(
         await wait_for(
             lambda: (
                 isinstance(app.screen, WorkflowNodeDialog)
+                and app.screen.is_mounted
                 and bool(app.screen.query("#workflow-node-retry"))
                 and app.screen.query_one("#workflow-node-actions").display
             ),
@@ -947,6 +959,7 @@ async def test_retry_is_latched_across_dialog_reopen_and_new_attempts(
         await wait_for(
             lambda: (
                 isinstance(app.screen, WorkflowNodeDialog)
+                and app.screen.is_mounted
                 and bool(app.screen.query("#workflow-node-retry"))
                 and app.screen.query_one("#workflow-node-actions").display
             ),
@@ -978,7 +991,7 @@ async def test_retry_is_latched_across_dialog_reopen_and_new_attempts(
 async def test_corrupt_new_attempt_clears_previous_attempt_details(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     write_workflow(project, "records", python_workflow("def fn(value):\n    return value\n", "fn"))
     bus = EventBus()
@@ -1003,7 +1016,11 @@ async def test_corrupt_new_attempt_clears_previous_attempt_details(
             await bus.publish(first)
             main._workflow.session_view.open_node("fn")
             await wait_for(
-                lambda: isinstance(app.screen, WorkflowNodeDialog) and bool(app.screen.query("#workflow-node-output")),
+                lambda: (
+                    isinstance(app.screen, WorkflowNodeDialog)
+                    and app.screen.is_mounted
+                    and bool(app.screen.query("#workflow-node-output"))
+                ),
                 pilot=pilot,
             )
             dialog = app.screen

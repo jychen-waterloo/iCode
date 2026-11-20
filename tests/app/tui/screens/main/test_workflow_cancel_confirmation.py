@@ -14,19 +14,21 @@ from chrys.foundation.config.settings import Settings
 from chrys.foundation.events import types as events
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.models.execution import ExecutionSnapshot
-from tests.orchestration.workflows._hosting import make_project
+from tests.orchestration.workflows._hosting import make_workdir
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import click_when_settled
 from tests.support.waiting import wait_for
 
 from ._workflow_support import WorkflowEngine, confirm_workflow_cancel, open_workflow, workflow_selection
 
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
+
 
 @pytest.mark.parametrize("locale", ["en", "zh-Hans"])
 async def test_cancel_requires_confirmation_and_dismissal_keeps_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, locale: str
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     bus, engine = EventBus(), WorkflowEngine()
     cancellations: list[events.WorkflowCancelRequest] = []
 
@@ -47,7 +49,12 @@ async def test_cancel_requires_confirmation_and_dismissal_keeps_the_run(
         await wait_for(lambda: not main._workflow_panel.query_one("#workflow-stop", Button).disabled, pilot=pilot)
         await click_when_settled(pilot, "#workflow-stop")
         await wait_for(
-            lambda: isinstance(app.screen, ConfirmDialog) and bool(app.screen.query("#confirm-no")), pilot=pilot
+            lambda: (
+                isinstance(app.screen, ConfirmDialog)
+                and app.screen.is_mounted
+                and bool(app.screen.query("#confirm-no"))
+            ),
+            pilot=pilot,
         )
         dialog = app.screen
         main._workflow.run_control.stop()
@@ -60,7 +67,7 @@ async def test_cancel_requires_confirmation_and_dismissal_keeps_the_run(
         assert not main.query_one("#workflow-stop", Button).has_focus
         assert cancellations == [] and engine.snapshot.kind == "workflow"
         main._workflow.run_control.stop()
-        await wait_for(lambda: isinstance(app.screen, ConfirmDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, ConfirmDialog) and app.screen.is_mounted, pilot=pilot)
         await pilot.press("escape")
         await wait_for(lambda: app.screen is main, pilot=pilot)
         assert cancellations == []
@@ -75,7 +82,7 @@ async def test_cancel_requires_confirmation_and_dismissal_keeps_the_run(
 async def test_stale_cancel_confirmation_never_cancels_a_new_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     bus, engine = EventBus(), WorkflowEngine()
     cancellations: list[events.WorkflowCancelRequest] = []
 
@@ -93,7 +100,7 @@ async def test_stale_cancel_confirmation_never_cancels_a_new_run(
         main._workflow.session_view._run_ids = ["old-run", "finishing"]
         await engine.set_execution(ExecutionSnapshot("workflow", "old-run", True), main._services.bus)
         main._workflow.run_control.stop()
-        await wait_for(lambda: isinstance(app.screen, ConfirmDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, ConfirmDialog) and app.screen.is_mounted, pilot=pilot)
         dialog = app.screen
         await engine.set_execution(
             ExecutionSnapshot("idle") if replacement == "idle" else ExecutionSnapshot("workflow", replacement, True),
@@ -107,7 +114,7 @@ async def test_stale_cancel_confirmation_never_cancels_a_new_run(
         await engine.set_execution(ExecutionSnapshot("workflow", "finishing", True), main._services.bus)
         await bus.publish(events.WorkflowRunStarted(run_id="finishing"))
         main._workflow.run_control.stop()
-        await wait_for(lambda: isinstance(app.screen, ConfirmDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, ConfirmDialog) and app.screen.is_mounted, pilot=pilot)
         await bus.publish(events.WorkflowRunFinished(run_id="finishing", outcome="completed"))
         await wait_for(lambda: app.screen is main, pilot=pilot)
         assert cancellations == []
@@ -116,7 +123,7 @@ async def test_stale_cancel_confirmation_never_cancels_a_new_run(
 async def test_pending_request_cannot_cancel_an_unrelated_starting_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     bus, engine = EventBus(), WorkflowEngine()
     app = make_chrys_app(tmp_path / "sessions", engine=engine, event_bus=bus)
     async with app.run_test(size=(120, 40)) as pilot:

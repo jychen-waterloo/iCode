@@ -19,7 +19,7 @@ from chrys.foundation.models.execution import ExecutionSnapshot
 from chrys.foundation.models.workflow_session import WorkspaceSnapshot
 from chrys.foundation.models.workspace import WorkingDir, Workspace
 from tests.app.tui.screens.main._workflow_support import workflow_selection
-from tests.orchestration.workflows._hosting import make_project, write_workflow
+from tests.orchestration.workflows._hosting import make_workdir, write_workflow
 from tests.support.event_capture import capture_event_sequence
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import click_when_settled
@@ -28,12 +28,14 @@ from tests.support.workflow_workers import python_workflow
 
 from ._workflow_support import WorkflowEngine, open_workflow, switch_mode
 
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
+
 
 @pytest.mark.parametrize("changed", [False, True])
 async def test_workspace_update_with_same_cwd_preserves_preparation_and_captures_all_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: bool
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     engine, bus = WorkflowEngine(), EventBus()
     engine.workspace = Workspace.from_cwd(str(project))
@@ -74,7 +76,7 @@ async def test_workspace_update_with_same_cwd_preserves_preparation_and_captures
 async def test_bound_workspace_shows_the_same_modal_and_chat_still_changes_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str, locale: str
 ) -> None:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     other = tmp_path / "other"
     other.mkdir()
     monkeypatch.chdir(project)
@@ -107,7 +109,12 @@ async def test_bound_workspace_shows_the_same_modal_and_chat_still_changes_direc
                 # A picker opened during the draft may finish after a Run was accepted.
                 main._workspace_actions.on_chdir_dialog_result(str(other))
             await wait_for(
-                lambda: isinstance(app.screen, NoticeDialog) and bool(app.screen.query("#confirm-no")), pilot=pilot
+                lambda: (
+                    isinstance(app.screen, NoticeDialog)
+                    and app.screen.is_mounted
+                    and bool(app.screen.query("#confirm-no"))
+                ),
+                pilot=pilot,
             )
             dialog = app.screen
             message = str(dialog.query_one("#confirm-message", Static).content)
@@ -126,17 +133,17 @@ async def test_bound_workspace_shows_the_same_modal_and_chat_still_changes_direc
             )
             await click_when_settled(pilot, close)
             await wait_for(lambda: app.screen is main, pilot=pilot)
-            assert controller.session_id == "bound" and controller.project_cwd == str(project)
+            assert controller.session_id == "bound" and controller.workdir == str(project)
             main._set_workflow_mode(False)
             await main._workspace_actions.start_chdir(str(other)).wait()
             assert [event.primary_cwd for event in changes] == [str(other)]
-            assert controller.project_cwd == str(project)
+            assert controller.workdir == str(project)
 
 
 async def test_workspace_modal_new_session_opens_picker_and_preserves_history_on_cancel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     bus = EventBus()
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine(), event_bus=bus)
     async with app.run_test(size=(140, 48)) as pilot:
@@ -155,10 +162,15 @@ async def test_workspace_modal_new_session_opens_picker_and_preserves_history_on
         await bus.publish(events.WorkflowRunFinished(run_id="run", session_id="bound", outcome="cancelled"))
         main._workspace_actions.open_working_dir_picker()
         await wait_for(
-            lambda: isinstance(app.screen, NoticeDialog) and bool(app.screen.query("#confirm-yes")), pilot=pilot
+            lambda: (
+                isinstance(app.screen, NoticeDialog)
+                and app.screen.is_mounted
+                and bool(app.screen.query("#confirm-yes"))
+            ),
+            pilot=pilot,
         )
         await click_when_settled(pilot, "#confirm-yes")
-        await wait_for(lambda: isinstance(app.screen, WorkflowPickerDialog), pilot=pilot)
+        await wait_for(lambda: isinstance(app.screen, WorkflowPickerDialog) and app.screen.is_mounted, pilot=pilot)
         assert controller.session_id == "bound"
         await pilot.press("escape")
         await wait_for(lambda: app.screen is main, pilot=pilot)
@@ -168,8 +180,8 @@ async def test_workspace_modal_new_session_opens_picker_and_preserves_history_on
 async def test_draft_workspace_change_reloads_preview_for_the_new_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project = make_project(tmp_path)
-    other = make_project(tmp_path / "other")
+    project = make_workdir(tmp_path)
+    other = make_workdir(tmp_path / "other")
     monkeypatch.chdir(project)
     bus = EventBus()
     app = make_chrys_app(tmp_path / "sessions", engine=WorkflowEngine(), event_bus=bus)
@@ -191,7 +203,7 @@ async def test_draft_workspace_change_reloads_preview_for_the_new_directory(
             ),
             pilot=pilot,
         )
-        assert main._workflow.browser.catalog.project_cwd == other
+        assert main._workflow.browser.catalog.workdir == other
         assert main._workflow.session_id == ""
 
 
@@ -199,7 +211,7 @@ async def test_draft_workspace_change_reloads_preview_for_the_new_directory(
 async def test_running_workflow_directory_command_shows_workspace_modal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
-    monkeypatch.chdir(make_project(tmp_path))
+    monkeypatch.chdir(make_workdir(tmp_path))
     other = tmp_path / "other"
     other.mkdir()
     bus, engine = EventBus(), WorkflowEngine()
@@ -223,7 +235,11 @@ async def test_running_workflow_directory_command_shows_workspace_modal(
             text = f"/{command} {other}"
             assert main._suggestions.dispatch_slash_command(text)
             await wait_for(
-                lambda: isinstance(app.screen, NoticeDialog) and bool(app.screen.query("#confirm-yes")),
+                lambda: (
+                    isinstance(app.screen, NoticeDialog)
+                    and app.screen.is_mounted
+                    and bool(app.screen.query("#confirm-yes"))
+                ),
                 pilot=pilot,
             )
             assert "/new" in str(app.screen.query_one("#confirm-message", Static).content)
@@ -250,7 +266,7 @@ async def test_empty_draft_workspace_change_updates_welcome_and_new_session_pick
         await switch_mode(main, pilot)
         panel = main._workflow_panel
         await wait_for(
-            lambda: str(panel.border_subtitle) == str(original) and not main._workflow._refresh_pending,
+            lambda: panel.workspace_cwd == str(original) and not main._workflow._refresh_pending,
             pilot=pilot,
         )
         assert panel.preview is None and not main._workflow.session_id
@@ -258,14 +274,15 @@ async def test_empty_draft_workspace_change_updates_welcome_and_new_session_pick
             await main._workspace_actions.start_chdir(str(other)).wait()
             assert not changes
         assert main._workspace_cwd() == str(original)
-        await wait_for(lambda: str(panel.border_subtitle) == str(other), pilot=pilot)
-        assert panel.workspace_cwd == str(other)
+        await wait_for(lambda: panel.workspace_cwd == str(other), pilot=pilot)
         assert panel.query_one(WelcomeWidget).render().cwd == str(other)
         assert panel.preview is None and not main._workflow.session_id
         await click_when_settled(pilot, "#workflow-new")
         await wait_for(
             lambda: (
-                isinstance(app.screen, WorkflowPickerDialog) and bool(main._workflow.browser._picker.selection.rows)
+                isinstance(app.screen, WorkflowPickerDialog)
+                and app.screen.is_mounted
+                and bool(main._workflow.browser._picker.selection.rows)
             ),
             pilot=pilot,
         )

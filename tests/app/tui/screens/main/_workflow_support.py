@@ -80,7 +80,11 @@ async def start_workflow(pilot: Pilot, text: str = "") -> None:
 async def confirm_workflow_cancel(pilot: Pilot) -> None:
     """Accept the workflow's cancellation warning through its real modal."""
     await wait_for(
-        lambda: isinstance(pilot.app.screen, ConfirmDialog) and bool(pilot.app.screen.query("#confirm-yes")),
+        lambda: (
+            isinstance(pilot.app.screen, ConfirmDialog)
+            and pilot.app.screen.is_mounted
+            and bool(pilot.app.screen.query("#confirm-yes"))
+        ),
         pilot=pilot,
     )
     await click_when_settled(pilot, "#confirm-yes")
@@ -144,6 +148,7 @@ async def dismiss_workflow_notice(main: MainScreen, pilot: Pilot, message: str) 
     await wait_for(
         lambda: (
             isinstance(main.app.screen, NoticeDialog)
+            and main.app.screen.is_mounted
             and main._workflow.feedback.notice is main.app.screen
             and bool(main.app.screen.query("#confirm-yes"))
         ),
@@ -202,7 +207,7 @@ def workflow_selection(main: MainScreen, session_id: str = "workflow-session") -
     identity = (
         WorkflowIdentity(source.workflow_id, source.canonical_path, source.source_kind)
         if source is not None
-        else WorkflowIdentity("test", "/test.py", "project")
+        else WorkflowIdentity("test", "/test.py", "workdir")
     )
     workspace = main._workflow.workspace
     return WorkflowSessionSelection(session_id, identity, workspace)

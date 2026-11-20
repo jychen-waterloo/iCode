@@ -14,6 +14,8 @@ import yaml
 from chrys import __version__
 from chrys.app.cli import app as cli_app
 from chrys.foundation.branding import APP_COMMAND, APP_DISPLAY_NAME
+from chrys.foundation.platform import get_platform
+from chrys.foundation.platform.files import atomic_write_owner_only_text
 from tests.support.paths import REPO_ROOT
 
 
@@ -102,6 +104,22 @@ def test_noun_commands_accept_singular_and_plural(
         assert cli_app.main() == 13
 
     assert calls == [["list", "--json"], ["list", "--json"]]
+
+
+def test_chrys_rsi_dispatches_to_rsi_subcommand(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_rsi_main(argv: list[str] | None = None) -> int:
+        calls.append(list(argv or []))
+        return 14
+
+    import chrys.app.cli.rsi as rsi_module
+
+    monkeypatch.setattr(rsi_module, "main", fake_rsi_main)
+    monkeypatch.setattr(sys, "argv", ["chrys", "rsi", "list", "--json"])
+
+    assert cli_app.main() == 14
+    assert calls == [["list", "--json"]]
 
 
 def test_chrys_hidden_tui_subprocess_dispatches_to_tui(monkeypatch) -> None:
@@ -225,6 +243,7 @@ def test_chrys_help_shows_top_level_modes(monkeypatch, capsys) -> None:
     assert "  approval    List, revoke or clear remembered approvals" in out.out
     assert "  hook        List hooks and check hook configuration files" in out.out
     assert "  workflow    List, validate and run workflows headlessly" in out.out
+    assert "  rsi         Experimental RSI eval and profile optimize" in out.out
     assert "agent, model, approval, hook, workflow and trajectory also work in the plural;" in out.out
     assert "agent, model, approval, hook and workflow list when given no subcommand." in out.out
     assert "acp" in out.out
@@ -291,6 +310,19 @@ def test_chrys_install_dispatches_to_installer(monkeypatch) -> None:
 
     assert cli_app.main() == 0
     assert calls == [True]
+
+
+def test_cancelled_install_leaves_legacy_settings_in_place(monkeypatch) -> None:
+    config = get_platform().config_dir
+    settings = config / "settings.yaml"
+    legacy = "project.hooks_enabled: true\n"
+    atomic_write_owner_only_text(settings, legacy)
+    monkeypatch.setattr("chrys.app.installer.install_to_path", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["icode", "install"])
+
+    assert cli_app.main() == 0
+    assert settings.read_text(encoding="utf-8") == legacy
+    assert not (config / "backups").exists()
 
 
 def test_chrys_install_help_uses_capitalized_help_text(monkeypatch, capsys) -> None:

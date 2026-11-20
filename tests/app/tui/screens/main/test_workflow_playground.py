@@ -19,7 +19,7 @@ from chrys.app.tui.widgets.workflow.graph import WorkflowGraph
 from chrys.foundation.events import types as events
 from chrys.service.llm.mock import MockChatClient
 from tests.app.tui.screens.main._workflow_support import start_workflow
-from tests.orchestration.workflows._hosting import make_host, make_project, patch_runtime, write_workflow
+from tests.orchestration.workflows._hosting import make_host, make_workdir, patch_runtime, write_workflow
 from tests.support.tui_app_harness import make_chrys_app
 from tests.support.tui_helpers import click_when_settled
 from tests.support.waiting import wait_for
@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from chrys.app.tui.app import ChrysApp
     from chrys.app.tui.screens.main.screen import MainScreen
     from chrys.orchestration.session_host import ChrysSessionHost
+
+pytestmark = pytest.mark.usefixtures("frozen_earlier_heap")
 
 PLAYGROUND_SOURCE = Path(__file__).resolve().parents[4] / "service/workflows/fixtures/retry_playground.py"
 # The fixture paces itself for a person watching. These tests follow its events, so a slow
@@ -56,7 +58,7 @@ class _AwaitingRetry:
 
 @contextlib.asynccontextmanager
 async def _playground_awaiting_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_AwaitingRetry]:
-    project = make_project(tmp_path)
+    project = make_workdir(tmp_path)
     monkeypatch.chdir(project)
     source = PLAYGROUND_SOURCE.read_bytes()
     assert source.count(_DEMO_PACE) == 1
@@ -124,7 +126,10 @@ async def test_playground_waits_for_manual_retry_then_continues_without_replayin
         graph.focus()
         await pilot.press("enter")
         await wait_for(
-            lambda: isinstance(app.screen, WorkflowNodeDialog) and app.screen.selected is not None, pilot=pilot
+            lambda: (
+                isinstance(app.screen, WorkflowNodeDialog) and app.screen.is_mounted and app.screen.selected is not None
+            ),
+            pilot=pilot,
         )
         dialog = app.screen
         assert isinstance(dialog, WorkflowNodeDialog)

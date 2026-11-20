@@ -17,6 +17,7 @@ from chrys.app.tui import i18n as tui_i18n
 from chrys.app.tui.i18n import LocaleController, LocaleSwitchStatus
 from chrys.app.tui.widgets.chat.compaction_card import CompactionCard
 from chrys.app.tui.widgets.chat.context_fold import ContextFoldWidget
+from chrys.app.tui.widgets.chat.live_process_row import LiveProcessRow
 from chrys.app.tui.widgets.chat.messages import (
     AgentMessage,
     ErrorMessage,
@@ -28,13 +29,15 @@ from chrys.app.tui.widgets.chat.messages import (
 )
 from chrys.app.tui.widgets.chat.panel import ChatPanel, _ScrollToBottomButton
 from chrys.app.tui.widgets.chat.renderers.ask_user import AskUserToolCall
+from chrys.app.tui.widgets.chat.replay import ReplayStructuredCompletion, _structured_completion_message
 from chrys.app.tui.widgets.chat.session_json import SessionJsonPanel
 from chrys.app.tui.widgets.chat.tool_call import (
     ToolCall,
     ToolGroup,
 )
 from chrys.foundation.config.settings import Settings
-from chrys.foundation.i18n import Localizer
+from chrys.foundation.i18n import Localizer, MessageRef
+from chrys.foundation.i18n.formatting import format_message
 from chrys.foundation.models.history_markers import ANSWER_SEGMENT_KEY, HistoryMarkerKind
 from chrys.foundation.tool_kinds import (
     KIND_ASK_USER,
@@ -46,6 +49,7 @@ from tests.support.tui_helpers import (
     ChatPanelApp,
     WidgetApp,
     chat_content_children,
+    click_when_settled,
 )
 from tests.support.waiting import wait_for
 
@@ -175,6 +179,78 @@ async def test_chat_panel_replay_uses_created_at_metadata() -> None:
         assert agent._ts == expected
         assert agent._duration_ms == 2345
         assert agent._header_text().plain == f"▾ Code Agent {expected} (2s)"
+
+
+class _SentinelTimestampLocalization:
+    """Localization port that renders the timestamp entry as a sentinel, so a missing resolver shows."""
+
+    def render(self, reference: MessageRef) -> str:
+        if reference.definition.key == "tui.chat.message_timestamp":
+            return "- STAMP"
+        return format_message(reference)
+
+
+async def test_chat_panel_resolves_timestamps_through_localization() -> None:
+    created_at = datetime.now(UTC).replace(second=0, microsecond=0)
+    raw_messages = [
+        {
+            "role": "user",
+            "contents": [{"type": "text", "text": "hello"}],
+            "additional_properties": {MESSAGE_CREATED_AT_KEY: created_at.isoformat()},
+        },
+        {
+            "role": "assistant",
+            "contents": [{"type": "text", "text": "hi"}],
+            "additional_properties": {MESSAGE_CREATED_AT_KEY: created_at.isoformat()},
+        },
+        {
+            "role": "assistant",
+            "contents": [
+                {
+                    "type": "function_call",
+                    "name": "read_file",
+                    "call_id": "call-1",
+                    "arguments": {"path": "/tmp/file"},
+                    "additional_properties": {
+                        TRAJECTORY_TIMING_KEY: {
+                            "started_at": created_at.isoformat(),
+                            "finished_at": created_at.isoformat(),
+                            "duration_ms": 5,
+                        }
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "contents": [{"type": "function_result", "call_id": "call-1", "result": "ok"}]},
+    ]
+
+    async with ChatPanelApp(localization=_SentinelTimestampLocalization()).run_test() as pilot:
+        panel = pilot.app.query_one(ChatPanel)
+        panel.set_profile("Code Agent")
+        await panel.add_user_message("live hello", created_at=created_at)
+        await panel.add_agent_message("live hi", created_at=created_at)
+        await pilot.pause()
+
+        assert panel.query(UserMessage).last()._ts == "- STAMP"
+        assert panel.query(AgentMessage).last()._ts == "- STAMP"
+
+        await panel.clear()
+        await panel.replay_history(raw_messages, initial_profile="Code Agent")
+        await pilot.pause()
+
+        assert panel.query(UserMessage).last()._ts == "- STAMP"
+        assert panel.query(AgentMessage).last()._ts == "- STAMP"
+        assert panel.query_one(ToolGroup)._tool_records["call-1#0"].timestamp == "- STAMP"
+
+
+def test_structured_completion_message_uses_the_given_timestamp_resolver() -> None:
+    entry = ReplayStructuredCompletion(created_at=datetime.now(UTC).isoformat())
+
+    message = _structured_completion_message(
+        entry, "Code Agent", is_compressed=False, resolve_message=lambda _ref: "- STAMP"
+    )
+
+    assert message._ts == "- STAMP"
 
 
 async def test_chat_panel_replay_adds_action_only_for_trailing_interruption() -> None:
@@ -1063,16 +1139,60 @@ async def test_chat_panel_withdraws_the_answer_segments_a_bare_continue_asks_for
         assert cp.query_one(status_type) is status
 
 
-async def test_a_start_reusing_a_finished_call_id_leaves_that_card_showing_the_call_its_result_answered() -> None:
+@pytest.mark.parametrize("pruned", [False, True], ids=["mounted", "pruned"])
+async def test_a_start_reusing_a_finished_call_id_leaves_that_card_showing_the_call_its_result_answered(
+    pruned: bool,
+) -> None:
     async with ChatPanelApp().run_test() as pilot:
         cp = pilot.app.query_one(ChatPanel)
         await cp.add_user_message("prompt")
         await cp.add_tool_start("c1", "alpha", "", '{"x": 1}', args={"x": 1})
+        group = cp.query_one(ToolGroup)
+        row = next(iter(cp.query(LiveProcessRow)), None)
+        if row is not None and not pruned:
+            await click_when_settled(pilot, row)
+            group.collapsed = False
         await cp.add_tool_result("c1", "alpha", "alpha result")
+        if pruned:
+            assert row is not None
+            await wait_for(lambda: not group.query(ToolCall), pilot=pilot, description="the finished card is pruned")
         await cp.add_tool_start("c1", "beta", "", '{"y": 2}', args={"y": 2})
+        if pruned:
+            assert row is not None
+            await click_when_settled(pilot, row)
+            group.collapsed = False
+            await wait_for(lambda: bool(group.query(ToolCall)), pilot=pilot, description="the original card is rebuilt")
 
         [card] = cp.query(ToolCall)
-        assert (card.tool_name, card.args, card.status) == ("alpha", {"x": 1}, "complete")
+        assert (card.tool_name, card.args, card.status, card.result_text) == (
+            "alpha",
+            {"x": 1},
+            "complete",
+            "alpha result",
+        )
+        if row is not None:
+            assert row.render().plain.startswith("▾ 1 tool call:")
+        [record] = group._tool_records.values()
+        assert record is not None and (record.args, record.result) == ({"x": 1}, "alpha result")
+
+
+async def test_a_repeated_tool_start_does_not_open_a_new_group_after_an_answer() -> None:
+    async with ChatPanelApp().run_test() as pilot:
+        panel = pilot.app.query_one(ChatPanel)
+        await panel.add_user_message("prompt")
+        await panel.add_tool_start("c1", "alpha", "", args={"x": 1})
+        await panel.add_tool_result("c1", "alpha", "alpha result")
+        await panel.add_answer_delta("a1", "The answer.")
+        await panel.add_tool_start("c1", "beta", "", args={"y": 2})
+
+        [group] = panel.query(ToolGroup)
+        row = panel.query_one(LiveProcessRow)
+        await click_when_settled(pilot, row)
+        group.collapsed = False
+        await wait_for(lambda: bool(group.query(ToolCall)), pilot=pilot, description="the original card is visible")
+        assert panel.query_one(AgentMessage).display
+        assert row.render().plain.startswith("▾ 1 tool call:")
+        assert group.query_one(ToolCall).result_text == "alpha result"
 
 
 async def test_chat_panel_keeps_every_answer_a_withdrawal_does_not_name() -> None:
