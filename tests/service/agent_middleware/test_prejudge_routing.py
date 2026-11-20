@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import MappingProxyType
 
@@ -21,8 +22,10 @@ from chrys.service.agent_middleware.control.approval import ApprovalMiddleware
 from chrys.service.agent_middleware.events.tool_events import ToolEventMiddleware
 from chrys.service.approval.policy import ApprovalMode, ApprovalPolicy
 from chrys.service.approval.prejudge_v2 import Policy, PreJudgeResult, Route
+from chrys.service.approval.prejudge_v2.execution import ApprovedArgv
 from chrys.service.profiles.agents.schema import ApprovalConfig
 from tests.support.event_capture import capture_events
+from tests.support.prejudge import require_grammars
 
 
 @pytest.mark.parametrize(
@@ -38,6 +41,11 @@ async def test_shell_allow_and_defer_follow_existing_approval(
     monkeypatch, mode, suggestion, expected_executions, expected_requests
 ):
     monkeypatch.setattr(approval_module, "load_policy", lambda _: Policy(mode, "pilot", ()))
+
+    def verified_launch(dialect, command, argv):
+        return ApprovedArgv(dialect, command, argv, asyncio.current_task())
+
+    monkeypatch.setattr(approval_module, "prepare_execution", verified_launch)
     monkeypatch.setattr(
         approval_module,
         "route",
@@ -259,8 +267,8 @@ async def test_enforce_without_command_text_logs_defer_and_asks(monkeypatch, cap
 @pytest.mark.parametrize(
     ("command", "expected_executions", "expected_requests"),
     [
-        ("git status", 1, 0),
-        ("git 'status'", 1, 0),  # Valid quoted literal still ALLOWs
+        ("git status", 0, 1),  # A lexically static name is not a bound executable
+        ("git 'status'", 0, 1),
         ("ls *.py", 1, 0),  # DEFER retains the existing readonly shortcut
         ("rm x", 0, 1),  # Unmatched commands enter ordinary approval
         ("$'rm' x", 0, 1),
@@ -275,8 +283,7 @@ async def test_enforce_without_command_text_logs_defer_and_asks(monkeypatch, cap
 async def test_real_parser_yaml_policy_and_approval_integration(
     tmp_path, monkeypatch, command, expected_executions, expected_requests
 ):
-    pytest.importorskip("tree_sitter")
-    pytest.importorskip("tree_sitter_bash")
+    require_grammars("tree_sitter", "tree_sitter_bash")
     from chrys.service.approval.prejudge_v2 import load_policy
 
     policy_file = tmp_path / "prejudge.yaml"
@@ -339,8 +346,7 @@ async def test_real_parser_yaml_policy_and_approval_integration(
     ],
 )
 async def test_real_parser_empty_policy_keeps_readonly_approval(tmp_path, monkeypatch, command):
-    pytest.importorskip("tree_sitter")
-    pytest.importorskip("tree_sitter_bash")
+    require_grammars("tree_sitter", "tree_sitter_bash")
     from chrys.service.approval.prejudge_v2 import load_policy
 
     path = tmp_path / "prejudge.yaml"
@@ -435,7 +441,8 @@ async def test_session_policy_snapshot_shared_by_middleware_instances(monkeypatc
 async def test_bypass_to_manual_lazily_loads_one_session_snapshot(monkeypatch):
     calls = []
 
-    def load(_):
+    def load(_, *, report_shadow_failure=False):
+        assert report_shadow_failure
         calls.append(True)
         return Policy("enforce", "switch", ())
 
@@ -481,16 +488,25 @@ async def test_shadow_logs_bounded_command_text_and_spans(monkeypatch, caplog):
         executed = True
 
     try:
-        with caplog.at_level(logging.INFO, logger=approval_module._prejudge_logger.name):
+        with caplog.at_level(logging.DEBUG, logger=approval_module._prejudge_logger.name):
             await middleware.process(FunctionInvocationContext(tool, {"command": command}), execute)
         assert executed
-        assert "shadow route=defer" in caplog.text
-        assert "spans=((0, 4),)" in caplog.text
+        info = [record.getMessage() for record in caplog.records if record.levelno == logging.INFO]
+        assert any("shadow route=defer" in line and "spans=((0, 4),)" in line for line in info)
+        assert all("command=" not in line for line in info)
         assert "command='echo " in caplog.text
         assert "[truncated]" in caplog.text
         assert "hidden_suffix" not in caplog.text
     finally:
         await middleware.close()
+
+
+@pytest.mark.parametrize("command", ["\x1b\n\x00é", "\x00" * 300, "é" * 600, "a" * 900])
+def test_shadow_preview_counts_escaped_output(command):
+    preview = approval_module._shadow_command_preview(command)
+    assert len(preview) <= 512
+    assert preview.isascii()
+    assert all(" " <= char <= "~" for char in preview)
 
 
 async def test_human_edited_command_does_not_reenter_prejudge(monkeypatch):

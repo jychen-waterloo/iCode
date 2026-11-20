@@ -1,8 +1,8 @@
 # Structured Shell Pre-Judge
 
-iCode can optionally inspect Bash commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut; DEFER continues through existing approval. Pre-Judge does not deny commands. Existing Hooks, approval policy, the read-only shortcut, DAA (the existing authorization-reuse mechanism), remembered grants, and the **pre-execution** Shell Command Filter retain their existing behavior.
+iCode can optionally inspect Bash, Zsh, and PowerShell commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut. DEFER continues through existing approval. Existing Hooks, approval policy, the read-only shortcut, remembered grants, and the **pre-execution** Shell Command Filter still apply.
 
-Place `prejudge.yaml` in iCode's trusted user configuration directory (`~/.chrys/prejudge.yaml` on macOS/Linux). Workspace files do not provide rules.
+Place `prejudge.yaml` in iCode's trusted user configuration directory (`~/.chrys/prejudge.yaml` on macOS/Linux). The policy applies across profiles and workspaces that use this directory.
 
 ```yaml
 schema_version: 1
@@ -13,12 +13,7 @@ rules:
     effect: allow
     target: command
     match:
-      argv_exact: [git, status]
-  - id: allow-echo
-    effect: allow
-    target: command
-    match:
-      argv_first: [echo]
+      argv_exact: ['/usr/bin/git', status]
 ```
 
 ### Matcher reference
@@ -30,17 +25,45 @@ Each rule uses `effect: allow`, `target: command`, and exactly **one** top-level
 | `argv_exact: [git, status]` | Full literal argument vector equals exactly the given non-empty sequence | ALLOW |
 | `argv_first: [echo]` | First token of the complete literal argument vector equals the given token | **ALLOW only** |
 
-Matchers require **lists of non-empty literal strings**, even when there is only one token. An ALLOW rule using `argv_first: [git]` would grant *all* Git subcommands with complete static arguments, including mutating ones; prefer `argv_exact` for commands with risk-bearing arguments. Unknown keys, multiple matcher fields, empty lists, and non-string values are rejected during policy loading. The removed `effect: block` and `prefix_first` are rejected rather than silently ignored; remove those rules from older configurations. The policy schema version is `1`.
+Matchers require **lists of non-empty literal strings**, even when there is only one token. `argv_first: [git]` matches every static Git subcommand, including mutating ones. The executable check still applies, and a broad rule such as `argv_first: ['/usr/bin/git']` can authorize mutating subcommands on eligible systems. Prefer `argv_exact` to limit the permitted arguments. Unknown keys, multiple matcher fields, empty lists, and non-string values are rejected during policy loading. Remove older rules that use `effect: block` or `prefix_first`. The policy schema version is `1`.
 
 ### Decision safety
 
-A structured ALLOW requires **every executable AST node** to match an ALLOW rule, complete static argv and full supported syntax coverage. Anything unmatched, malformed, dynamic, or unsupported returns DEFER. DEFER continues through existing approval, including its read-only shortcut and sensitive-data checks. For example, `rm x` without an ALLOW rule enters ordinary approval; Pre-Judge does not reject it. Existing read-only approvals such as `ls *.py`, `ls 2>/dev/null`, and `sort f` still work, including with `rules: []`. A static prefix alone never justifies ALLOW. In `echo "rm"`, `rm` is an argument rather than another executable.
+A structured ALLOW requires complete source coverage, a fully decoded static argument vector and a matching rule for every executable AST node. In enforce mode, iCode also checks the raw command and decoded arguments for sensitive targets. A single certified command with a verified executable can use the shortcut. Anything unmatched, malformed, dynamic, or unsupported returns to existing approval, including its read-only shortcut.
 
 Use `mode: "off"`, `mode: "shadow"`, or `mode: "enforce"`. Unquoted `mode: off` (parsed by YAML as `False`), `mode: false`, and an empty file also disable the feature without loading Tree-sitter. `shadow` logs proposed ALLOW/DEFER decisions without acting on them; `enforce` applies eligible ALLOW shortcuts. Malformed YAML **syntax** raises a path-qualified error at ordinary approval startup, even if the intended mode was `shadow`. Parseable `shadow` YAML with invalid rules or dependencies instead warns (with the file path and rule ID where applicable) and disables observation. Invalid `enforce` rules fail with the file path and rule ID. A BYPASS run does not load or validate `prejudge.yaml`; if approval mode later changes to MANUAL/AUTO, the policy is loaded then.
 
-The **AST matchers** support only Bash / Git Bash. Unsupported shells (zsh, sh, dash, PowerShell, cmd.exe), redirections, dynamic expansions, globs, and most control-flow constructs DEFER. The unsupported-dialect warning states that structured ALLOW is inactive and that the existing read-only shortcut still applies. For example, zsh `ls` and PowerShell `Get-ChildItem` retain their existing read-only approval. Matching uses literal command words without normalizing executable paths: a rule for `rm` does not match `/bin/rm`. Opaque wrappers such as `command`, `env` and `time` also DEFER to existing approval. Pre-Judge is an approval shortcut, not a shell security boundary.
+### Shells, syntax, and executable identity
 
-**Dependencies:** enabled configurations require the optional Tree-sitter parser packages `tree-sitter==0.25.1` and `tree-sitter-bash==0.25.1`. The packages must be installed for the running Python/platform; the normal `off` mode does not import them. The dependency lock and Linux offline-bundle verification are separate release gates.
+| Shell | Tree-sitter grammar | Supported syntax |
+| --- | --- | --- |
+| Bash / Git Bash | `tree-sitter-bash==0.25.1` | Static Bash argv, supported quoting, pipelines, and supported compound commands. |
+| Zsh | `tree-sitter-zsh==0.64.3` | Simple commands, bare arguments, single and double quoted literals, independent statements, and simple pipelines. |
+| Windows PowerShell 5.1 (`powershell`) and PowerShell 7+ (`pwsh`) | `tree-sitter-pwsh==0.38.1` | Simple commands, literal arguments, separate parameter tokens such as `-LiteralPath`, independent statements, and simple pipelines. |
+
+For Zsh and PowerShell, an ALLOW match requires a literal absolute executable path. The shared matcher compares literal tokens case-sensitively. Bare names, including PowerShell cmdlets such as `Get-Content`, may resolve to aliases, functions, or programs on PATH. An AST alone cannot establish that identity.
+
+In enforce mode, automatic execution is currently available for Bash, Zsh, and PowerShell 7 on POSIX when a single command names a verified system binary in `/usr/bin` or `/bin`. Its path must be root-owned, free of symlinks and unwritable by the current process, group, or other users. iCode passes the certified arguments directly to the executable, so shell profiles, `zshenv`, aliases and functions do not participate. Pipelines, compound commands, bare Bash names, and Windows commands, including Git Bash and both PowerShell versions, continue through existing approval. Shadow can still show matching rules for these commands.
+
+All adapters accept a conservative ASCII subset. Unsupported control characters, comments, line continuations, ambiguous escapes, dynamic expansion, redirections and parse errors DEFER. PowerShell accepts ordinary CRLF statement separators when the grammar covers the full source. Zsh defers glob qualifiers, option-dependent patterns and history expansion. PowerShell defers splatting, invocation operators, script blocks and native arguments whose quoting differs across versions. Unsupported shells such as `sh`, `dash`, `fish`, and `cmd.exe` continue through existing approval.
+
+### Install the optional parsers
+
+Install the parsers into the same Python 3.14 environment that runs iCode. An unavailable or incompatible additional grammar causes that dialect to DEFER. Off mode works without the parsers.
+
+| Installation | Command |
+| --- | --- |
+| Source checkout | `uv sync --locked`, then `uv run icode` |
+| uv tool | `uv tool install --reinstall --python 3.14 --with tree-sitter==0.25.1 --with tree-sitter-bash==0.25.1 --with tree-sitter-zsh==0.64.3 --with tree-sitter-pwsh==0.38.1 iCode-TUI` |
+| pipx, after installing iCode-TUI | `pipx inject iCode-TUI "tree-sitter==0.25.1" "tree-sitter-bash==0.25.1" "tree-sitter-zsh==0.64.3" "tree-sitter-pwsh==0.38.1"` |
+
+To check versions, run the following with the environment's Python. In a source checkout use `uv run python`. For a uv tool installation, `uv tool dir` locates the `icode-tui` environment. For pipx, use `pipx runpip iCode-TUI show tree-sitter tree-sitter-bash tree-sitter-zsh tree-sitter-pwsh`.
+
+```sh
+python -c "from importlib.metadata import version; print([version(p) for p in ('tree-sitter', 'tree-sitter-bash', 'tree-sitter-zsh', 'tree-sitter-pwsh')])"
+```
+
+The standard wheel and offline binary omit the optional parsers. When installing a wheel into a Python environment, install the same pins into that environment. Use a source, uv tool, or pipx installation for Pre-Judge if your offline binary has no supported way to install the optional wheels.
 
 ### Approval and execution boundaries
 
@@ -48,14 +71,14 @@ The **AST matchers** support only Bash / Git Bash. Unsupported shells (zsh, sh, 
 - **BYPASS skips structured Pre-Judge entirely, including shadow logging.** Both `icode run` and `icode workflow run` use BYPASS; `prejudge.yaml` does not change their approval behavior, and a BYPASS invocation does not validate the file.
 - **Human-edited approvals are not re-evaluated.** When a person edits and approves a command, the new command is not evaluated again by Pre-Judge or LLM Judge. The edited command still goes through `before_tool_call` Hooks and the configured Shell Command Filter.
 - **The Shell Command Filter checks the final command after approval and before the process starts.** BYPASS or human approval does not override it. However, this filter matches literal command names only and is **not a sandbox**: a blacklist of `[rm]` does not block every way to invoke `rm` (for example, `$'rm'`, `/bin/rm`, or `env rm`).
-- **DEFER does not guarantee a human dialog.** Profile overrides, remembered authorization grants, and the AUTO LLM judge may still approve and execute the tool call.
+- **Approval order.** Mandatory sensitive-data review takes precedence over the shortcuts. Eligible Structured ALLOW and legacy read-only shortcuts can satisfy a profile's `shell: require` rule before remembered grants or the AUTO judge are consulted. After DEFER, profile rules, the read-only shortcut, remembered grants, or the AUTO judge may still approve the call. See [Configure approvals](./approval.md).
 
 **Policy lifetime:** Approval middleware sharing an EventBus uses one trusted policy snapshot. In the TUI, this lasts for the entire iCode process: `/new`, restoring a chat, or switching agents does not reload `prejudge.yaml`. Exit and restart iCode to apply edits. Main-agent, sub-agent, and workflow middleware use the same snapshot. If iCode begins in BYPASS, the snapshot is taken only after switching to MANUAL/AUTO.
 
-If that first switch fails to load the policy, the requested MANUAL/AUTO mode still takes effect. The error is logged, and structured ALLOW and the read-only shortcut stay disabled for that EventBus lifetime; ordinary approval decides subsequent calls. Fix the configuration or parser installation and restart iCode to retry loading. Invalid enabled policies at ordinary startup still raise a path-qualified error.
+If that first switch fails to load the policy, the requested MANUAL/AUTO mode still takes effect. The TUI or ACP client receives a warning with the configuration path. Structured ALLOW stays disabled for that policy snapshot and ordinary approval, including the read-only shortcut, continues. Fix the YAML or parser installation and restart iCode to retry loading. Invalid enabled policies at ordinary startup still raise a path-qualified error.
 
-**Shadow diagnostics:** At INFO level, Shadow logs the decision, reason, policy/rule IDs, matched spans, and a one-line representation of the command (truncated to 512 characters). Command text can include secrets; restrict access to these logs and avoid passing sensitive literal tokens.
+**Shadow diagnostics.** In the TUI, look for `shadow route=` in `logs/debug.log` under the iCode configuration directory. ACP keeps INFO off stderr. To observe ACP Shadow decisions, opt in with `CHRYS_OTEL=true` and leave the telemetry endpoint and sensitive-data collection unset. With local telemetry, look in the session's `otel/logs.jsonl`. INFO records include the proposed rule decision, reason, policy/rule IDs and matched spans, with command text omitted. DEBUG can include an escaped command preview of up to 512 characters. Both headless CLI commands run in BYPASS and produce no Shadow decisions.
 
 ### Compatibility and limitations
 
-DEFER delegates to the existing read-only checker; it does not reimplement that checker as a second YAML engine. Its existing capabilities and limitations are retained, including shell-specific handling. This shortcut remains separate from the `shell_filter: read_only` preset, which has different semantics. The AST layer does not certify a glob as a fully resolved `argv_exact` vector, even when the legacy shortcut independently approves the command. Compatibility tests cover representative cases; they are not a proof of safety for every possible command.
+DEFER continues to the existing read-only checker and ordinary approval. For example, Zsh `ls` and PowerShell `Get-ChildItem` may still qualify for the read-only shortcut. The checker can approve commands containing globs even though the AST adapter cannot certify expanded argv. Moving the read-only checker into YAML is a separate design question. The `shell_filter: read_only` preset is an independent execution check. The policy author is responsible for the behavior of the trusted executables and arguments a rule authorizes.

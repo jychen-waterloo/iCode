@@ -69,6 +69,7 @@ from chrys.foundation.tool_result_metadata import (
 )
 from chrys.foundation.util.once_close import OnceClose
 from chrys.kernel.tools import SyncToolCancelledAfterCompletion
+from chrys.service.approval.prejudge_v2.execution import isolated_shell_call
 from chrys.service.mutations.trace import discard_trace_file, prefix_trace_file, shell_trace_argv
 from chrys.service.tools.approval_targets import (
     CHANGED_AFTER_APPROVAL,
@@ -284,7 +285,7 @@ def _pipefail_args(shell: ShellInfo) -> tuple[str, ...]:
     return ("-o", "pipefail") if shell.name in _PIPEFAIL_SHELLS else ()
 
 
-def _shell_argv_variants(shell: ShellInfo, command: str) -> list[tuple[str, ...]]:
+def _shell_argv_variants(shell: ShellInfo, command: str, *, source_command: str | None = None) -> list[tuple[str, ...]]:
     """Launch argvs to try in order: traced first (when armed), then bare.
 
     The mutation pipeline hands an fsatrace wrapper prefix over via
@@ -293,7 +294,12 @@ def _shell_argv_variants(shell: ShellInfo, command: str) -> list[tuple[str, ...]
     variant must degrade to the bare one: tracing may never change
     user-visible shell behavior.
     """
-    base = (shell.path, *_pipefail_args(shell), *shell.args, command)
+    approved = isolated_shell_call.get()
+    if approved is None:
+        base = (shell.path, *_pipefail_args(shell), *shell.args, command)
+    else:
+        source = command if source_command is None else source_command
+        base = approved.for_launch(shell.name, source)
     prefix = shell_trace_argv.get()
     if prefix:
         return [(*prefix, *base), base]
@@ -711,7 +717,7 @@ async def _spawn_pipe(command: str, shell: ShellInfo, cwd: str) -> _Command:
     stopped with it.
     """
     env = build_shell_subprocess_env()
-    argv_variants = _shell_argv_variants(shell, _prepare_pipe_command(command, shell))
+    argv_variants = _shell_argv_variants(shell, _prepare_pipe_command(command, shell), source_command=command)
     proc: ManagedStdioProcess | None = None
     for index, argv in enumerate(argv_variants):
         try:
@@ -957,6 +963,10 @@ class ShellTools:
         """Execute a shell command on the current platform."""
         budget = max(100, max_output_tokens)
         tasks = self._tasks
+        approved_shell = isolated_shell_call.get()
+        if approved_shell is not None and not approved_shell.claim(self._shell.name, command):
+            _record_shell_error()
+            return tool_error("approval_invalidated", "Shell command or dialect changed after structured approval.")
         # Validate command against filter policy (if configured); the command
         # this shell is given to stop a background task always passes.
         if self._filter is not None and not (tasks is not None and tasks.is_stop_command(command, self._shell.name)):

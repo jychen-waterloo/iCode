@@ -5,13 +5,14 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 import pytest
 
 from chrys.foundation.events.bus import EventBus
 from chrys.foundation.events.types import ApprovalRequest, ApprovalResponse
-from chrys.foundation.platform import get_platform
+from chrys.foundation.platform import ShellInfo, get_platform
 from chrys.foundation.tool_kinds import KIND_SHELL, set_tool_kind
 from chrys.kernel.middleware import FunctionInvocationContext
 from chrys.kernel.tools import FunctionTool
@@ -19,8 +20,11 @@ from chrys.service.agent_middleware.control import approval as approval_module
 from chrys.service.agent_middleware.control.approval import ApprovalMiddleware
 from chrys.service.approval import prejudge_v2
 from chrys.service.approval.policy import ApprovalMode, ApprovalPolicy
+from chrys.service.approval.prejudge_v2.execution import isolated_shell_call
 from chrys.service.profiles.agents.schema import ApprovalConfig
 from chrys.service.tools.builtins import shell_filter
+from chrys.service.tools.builtins.shell import _prepare_pipe_command, _shell_argv_variants
+from tests.support.prejudge import require_grammars
 
 
 def _write_policy() -> Path:
@@ -37,8 +41,7 @@ def _write_policy() -> Path:
 
 @pytest.fixture
 def allow_policy() -> Path:
-    pytest.importorskip("tree_sitter")
-    pytest.importorskip("tree_sitter_bash")
+    require_grammars("tree_sitter", "tree_sitter_bash")
     return _write_policy()
 
 
@@ -116,6 +119,15 @@ async def test_defer_keeps_legacy_readonly_approval(
 
 
 async def test_structured_allow_precedes_legacy_readonly(allow_policy: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from chrys.service.approval.prejudge_v2 import execution
+
+    monkeypatch.setattr(execution, "_trusted_system_executable", lambda path: path == "/usr/bin/printf")
+    allow_policy.write_text(
+        "schema_version: 1\nmode: enforce\npolicy_id: precedence\nrules:\n"
+        "  - id: sample\n    effect: allow\n    target: command\n    match: {argv_exact: ['/usr/bin/printf', sample]}\n",
+        encoding="utf-8",
+    )
+
     def forbidden_readonly(command: str, *, shell_name: str = "") -> bool:
         pytest.fail("An eligible structured ALLOW must return before the legacy readonly shortcut")
 
@@ -123,7 +135,7 @@ async def test_structured_allow_precedes_legacy_readonly(allow_policy: Path, mon
     tool = FunctionTool(name="bash")
     set_tool_kind(tool, KIND_SHELL)
     middleware = ApprovalMiddleware(ApprovalPolicy(ApprovalConfig(default="require"), tools=[tool]), EventBus())
-    context = FunctionInvocationContext(tool, {"command": "configured_tool --version"})
+    context = FunctionInvocationContext(tool, {"command": "/usr/bin/printf sample"})
     executed = False
 
     async def execute() -> None:
@@ -136,6 +148,77 @@ async def test_structured_allow_precedes_legacy_readonly(allow_policy: Path, mon
         assert middleware._decisions[-1]["status"] == "prejudge_approved"
     finally:
         await middleware.close()
+
+
+@pytest.mark.parametrize(
+    ("dialect", "executable", "grammar"),
+    [
+        ("zsh", "/usr/bin/git", "tree_sitter_zsh"),
+        ("powershell", "C:/Windows/System32/whoami.exe", "tree_sitter_pwsh"),
+        (
+            "pwsh",
+            "C:/Windows/System32/whoami.exe" if sys.platform == "win32" else "/usr/bin/git",
+            "tree_sitter_pwsh",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("mode", "sensitive"), [("enforce", False), ("enforce", True), ("shadow", False), ("bypass", False)]
+)
+async def test_real_adapted_policy_requires_certified_execution(
+    allow_policy: Path, dialect: str, executable: str, grammar: str, mode: str, sensitive: bool
+) -> None:
+    require_grammars(grammar)
+    argument = ".env" if sensitive else "fixture.txt"
+    command = f"{executable} {argument}"
+    allow_policy.write_text(
+        f"schema_version: 1\nmode: {'enforce' if mode == 'bypass' else mode}\npolicy_id: actual\nrules:\n"
+        f"  - id: native\n    effect: allow\n    target: command\n    match: {{argv_exact: ['{executable}', '{argument}']}}\n",
+        encoding="utf-8",
+    )
+    bus = EventBus()
+    requests: list[ApprovalRequest] = []
+
+    async def reject(req: ApprovalRequest) -> None:
+        requests.append(req)
+        await bus.publish(ApprovalResponse(request_id=req.request_id, approved=False))
+
+    await bus.subscribe(ApprovalRequest, reject)
+    tool = FunctionTool(name=dialect)
+    set_tool_kind(tool, KIND_SHELL)
+    middleware = ApprovalMiddleware(
+        ApprovalPolicy(ApprovalConfig(default="require"), tools=[tool]),
+        bus,
+        approval_mode=ApprovalMode.BYPASS if mode == "bypass" else ApprovalMode.MANUAL,
+    )
+    shell = ShellInfo(name=dialect, path=dialect, args=["-c"])
+    calls: list[tuple[str, ...]] = []
+    can_launch = sys.platform != "win32" and dialect != "powershell" and not sensitive and mode == "enforce"
+
+    async def record_spawn() -> None:
+        binding = isolated_shell_call.get()
+        if binding is not None:
+            assert binding.claim(dialect, command)
+        prepared = _prepare_pipe_command(command, shell)
+        calls.extend(_shell_argv_variants(shell, prepared, source_command=command))
+
+    try:
+        await middleware.process(FunctionInvocationContext(tool, {"command": command}), record_spawn)
+        assert isolated_shell_call.get() is None
+        if not can_launch and mode != "bypass":
+            assert len(requests) == 1
+            assert not calls
+        else:
+            assert not requests
+            assert len(calls) == 1
+            if can_launch:
+                assert calls[0] == (executable, argument)
+            else:
+                assert calls[0][0] == dialect
+                assert calls[0][-2:] == ("-c", _prepare_pipe_command(command, shell))
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, reject)
 
 
 async def test_readonly_fallback_keeps_sensitive_data_approval(allow_policy: Path) -> None:
@@ -198,16 +281,22 @@ async def test_leaving_bypass_with_bad_policy_requires_ordinary_approval(
 
     try:
         with caplog.at_level(logging.ERROR, logger=approval_module.__name__ + ".prejudge"):
-            first.set_approval_mode(mode)
+            assert first.set_approval_mode(mode) == path
         assert first.approval_mode is mode
         assert str(path) in caplog.text
-        second.set_approval_mode(mode)
+        assert second.set_approval_mode(mode) is None
         middlewares.append(ApprovalMiddleware(policy, bus, approval_mode=mode))
+        readonly_calls = []
+
+        async def readonly() -> None:
+            readonly_calls.append("ls")
+
         for middleware in middlewares:
             assert middleware.approval_mode is mode
-            for command in ("ls", "rm -rf build"):
-                await middleware.process(FunctionInvocationContext(tool, {"command": command}), execute)
-        assert len(requests) == 6
+            await middleware.process(FunctionInvocationContext(tool, {"command": "ls"}), readonly)
+            await middleware.process(FunctionInvocationContext(tool, {"command": "unconfigured_tool"}), execute)
+        assert readonly_calls == ["ls", "ls", "ls"]
+        assert len(requests) == 3
     finally:
         for middleware in middlewares:
             await middleware.close()
