@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import shutil
@@ -13,11 +12,9 @@ import sys
 
 import pytest
 
-from chrys.foundation.platform import ShellInfo
 from chrys.foundation.platform.process import windows_hidden_subprocess_kwargs
 from chrys.service.approval.prejudge_v2 import Matcher, Policy, Route, Rule, analyze, load_policy, route
-from chrys.service.approval.prejudge_v2.execution import isolated_shell_call
-from chrys.service.tools.builtins.shell import _shell_argv_variants
+from tests.support.prejudge import require_grammars
 
 _GRAMMARS = ("tree_sitter", "tree_sitter_zsh", "tree_sitter_pwsh")
 _PS_DIALECTS = ("powershell", "pwsh")
@@ -27,10 +24,7 @@ _PWSH_EXES = (
 )
 _ZSH_EXE = "/usr/bin/printf"
 
-if os.environ.get("CI") and any(importlib.util.find_spec(name) is None for name in _GRAMMARS):
-    raise RuntimeError("CI requires the pinned Zsh and PowerShell Tree-sitter grammars")
-for _grammar in _GRAMMARS:
-    pytest.importorskip(_grammar)
+require_grammars(*_GRAMMARS)
 
 
 @pytest.mark.parametrize(
@@ -240,38 +234,39 @@ def test_microsoft_parser_agrees_on_native_cst_subset(dialect, tmp_path):
         **windows_hidden_subprocess_kwargs(),
     )
     assert [list(node.argv or ()) for node in analysis.executable_nodes] == json.loads(parsed.stdout)
+    runtime_source = "Write-Output 'two words'\r\nWrite-Output 'next line'"
+    runtime_analysis = analyze(runtime_source, dialect=dialect)
+    assert runtime_analysis.coverage_complete
+    result = subprocess.run(
+        [executable, "-NoProfile", "-NonInteractive", "-Command", runtime_source],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+        **windows_hidden_subprocess_kwargs(),
+    )
+    assert result.stdout.splitlines() == [node.argv[1] for node in runtime_analysis.executable_nodes if node.argv]
 
 
-def test_native_zsh_launch_skips_user_startup_for_the_approved_text(tmp_path):
+def test_native_zsh_literal_argv_matches_the_certified_subset(tmp_path):
     executable = shutil.which("zsh")
     if not executable or sys.platform == "win32":
         if os.environ.get("CI") and sys.platform == "darwin":
-            pytest.fail("macOS CI requires zsh for the native startup test")
+            pytest.fail("macOS CI requires zsh for the native argv test")
         pytest.skip("native POSIX zsh is unavailable on this host")
-    (tmp_path / ".zshenv").write_text("alias -g token=changed\n", encoding="utf-8")
-    command = "/usr/bin/printf '%s' token | /usr/bin/head -1"
-    policy = Policy(
-        "enforce",
-        "native",
-        (
-            Rule("print", Route.ALLOW, Matcher("argv_exact", ("/usr/bin/printf", "%s", "token"))),
-            Rule("head", Route.ALLOW, Matcher("argv_exact", ("/usr/bin/head", "-1"))),
-        ),
+    command = "printf\t'[%s]' 'two words' ''"
+    analysis = analyze(command, dialect="zsh")
+    assert analysis.coverage_complete
+    assert analysis.executable_nodes[0].argv == ("printf", "[%s]", "two words", "")
+    result = subprocess.run(
+        [executable, "-f", "-c", command],
+        env={**os.environ, "HOME": str(tmp_path), "ZDOTDIR": str(tmp_path)},
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
     )
-    assert route(command, "zsh", policy).route is Route.ALLOW
-    shell = ShellInfo(name="zsh", path=executable, args=["-c"])
-    normal = _shell_argv_variants(shell, command)[0]
-    token = isolated_shell_call.set(("zsh", command))
-    try:
-        approved = _shell_argv_variants(shell, command)[0]
-    finally:
-        isolated_shell_call.reset(token)
-    env = {**os.environ, "HOME": str(tmp_path), "ZDOTDIR": str(tmp_path)}
-
-    def output(argv: tuple[str, ...]) -> str:
-        return subprocess.run(
-            argv, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=15
-        ).stdout
-
-    assert output(normal) == "changed"
-    assert output(approved) == "token"
+    assert result.stdout == "[two words][]"

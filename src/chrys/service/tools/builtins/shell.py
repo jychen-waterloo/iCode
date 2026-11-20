@@ -294,14 +294,12 @@ def _shell_argv_variants(shell: ShellInfo, command: str, *, source_command: str 
     variant must degrade to the bare one: tracing may never change
     user-visible shell behavior.
     """
-    startup_args: tuple[str, ...] = ()
-    if isolated_shell_call.get() == (shell.name, command if source_command is None else source_command):
-        if shell.name == "zsh":
-            # User startup files can change syntax, aliases and command resolution.
-            startup_args = ("-f", "-d", "-o", "noaliases")
-        elif shell.name in {"powershell", "pwsh"} and "-NoProfile" not in shell.args:
-            startup_args = ("-NoProfile",)
-    base = (shell.path, *startup_args, *_pipefail_args(shell), *shell.args, command)
+    approved = isolated_shell_call.get()
+    if approved is None:
+        base = (shell.path, *_pipefail_args(shell), *shell.args, command)
+    else:
+        source = command if source_command is None else source_command
+        base = approved.for_launch(shell.name, source)
     prefix = shell_trace_argv.get()
     if prefix:
         return [(*prefix, *base), base]
@@ -966,7 +964,7 @@ class ShellTools:
         budget = max(100, max_output_tokens)
         tasks = self._tasks
         approved_shell = isolated_shell_call.get()
-        if approved_shell is not None and approved_shell != (self._shell.name, command):
+        if approved_shell is not None and not approved_shell.claim(self._shell.name, command):
             _record_shell_error()
             return tool_error("approval_invalidated", "Shell command or dialect changed after structured approval.")
         # Validate command against filter policy (if configured); the command

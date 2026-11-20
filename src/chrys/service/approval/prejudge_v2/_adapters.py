@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 from chrys.foundation.platform import get_platform
 
-from ._analysis import Analysis, CommandNode
+from ._analysis import Analysis, CommandNode, covered
 
 if TYPE_CHECKING:
     from tree_sitter import Language, Node
@@ -61,15 +61,6 @@ def _raw(node: Node, data: bytes) -> bytes:
     return data[node.start_byte : node.end_byte]
 
 
-def _covered(node: Node, data: bytes, blanks: bytes) -> bool:
-    offset = node.start_byte
-    for child in node.children:
-        if child.start_byte < offset or data[offset : child.start_byte].strip(blanks):
-            return False
-        offset = child.end_byte
-    return not data[offset : node.end_byte].strip(blanks)
-
-
 def _zsh_word(node: Node, data: bytes) -> bytes | None:
     raw = _raw(node, data)
     if node.type in {"word", "number"} and not node.children and _ZSH_WORD.fullmatch(raw):
@@ -101,7 +92,7 @@ def _zsh_command(node: Node, data: bytes) -> tuple[str, ...] | None:
         or children[0].type != "command_name"
         or [child.type for child in children[0].children] != ["word"]
         or _raw(children[0], data) != _raw(children[0].children[0], data)
-        or not _covered(node, data, _HORIZONTAL)
+        or not covered(node, data, _HORIZONTAL)
     ):
         return None
     words = [children[0].children[0], *children[1:]]
@@ -156,16 +147,20 @@ def _ps_command(node: Node, data: bytes) -> tuple[str, ...] | None:
     if [child.type for child in children] not in (["command_name"], ["command_name", "command_elements"]):
         return None
     name = children[0]
-    if name.children or not _PS_BARE.fullmatch(_raw(name, data)) or not _covered(node, data, _HORIZONTAL):
+    if name.children or not _PS_BARE.fullmatch(_raw(name, data)) or not covered(node, data, _HORIZONTAL):
         return None
     tokens = [_raw(name, data).decode("ascii")]
     if len(children) == 2:
         elements = children[1]
-        if not elements.children or not _covered(elements, data, _HORIZONTAL):
+        if not elements.children or not covered(elements, data, _HORIZONTAL):
             return None
         separated = False
         for child in elements.children:
-            if child.type == "command_argument_sep" and not _raw(child, data).strip(_HORIZONTAL):
+            if (
+                child.type == "command_argument_sep"
+                and not _raw(child, data).strip(_HORIZONTAL)
+                and all(not part.is_named and _raw(part, data) in (b" ", b"\t") for part in child.children)
+            ):
                 separated = True
                 continue
             value = _ps_argument(child, data)
@@ -177,7 +172,7 @@ def _ps_command(node: Node, data: bytes) -> tuple[str, ...] | None:
 
 
 def _pipeline(node: Node, data: bytes) -> list[Node] | None:
-    if not _covered(node, data, _HORIZONTAL):
+    if not covered(node, data, _HORIZONTAL):
         return None
     commands = []
     for index, child in enumerate(node.children):
@@ -192,7 +187,7 @@ def _statements(node: Node, data: bytes, *, zsh: bool) -> list[Node] | None:
     commands: list[Node] = []
     terminated = True
     offset = node.start_byte
-    if not _covered(node, data, _LAYOUT):
+    if not covered(node, data, _LAYOUT):
         return None
     for child in node.children:
         terminated |= b"\n" in data[offset : child.start_byte]
@@ -206,7 +201,7 @@ def _statements(node: Node, data: bytes, *, zsh: bool) -> list[Node] | None:
             commands.append(child)
         elif child.type == "pipeline":
             if not zsh:
-                if [part.type for part in child.children] != ["pipeline_chain"] or not _covered(
+                if [part.type for part in child.children] != ["pipeline_chain"] or not covered(
                     child, data, _HORIZONTAL
                 ):
                     return None
@@ -224,8 +219,6 @@ def _statements(node: Node, data: bytes, *, zsh: bool) -> list[Node] | None:
 def analyze_adapted(data: bytes, *, dialect: str) -> Analysis:
     """Extract argv only when all executable source is accounted for."""
     zsh = dialect == "zsh"
-    if b"\0" in data or b"\r" in (data if zsh else data.replace(b"\r\n", b"")):
-        return Analysis(False, False, (), ("unsupported_input",))
     language = _language("zsh" if zsh else "pwsh")
     if language is None:
         return Analysis(False, False, (), ("grammar_unavailable",))
@@ -242,7 +235,7 @@ def analyze_adapted(data: bytes, *, dialect: str) -> Analysis:
         return Analysis(True, False, (), ("unsupported_construct",))
     statements = root
     if not zsh:
-        if [child.type for child in root.children] != ["statement_list"] or not _covered(root, data, _LAYOUT):
+        if [child.type for child in root.children] != ["statement_list"] or not covered(root, data, _LAYOUT):
             return Analysis(True, False, (), ("unsupported_construct",))
         statements = root.children[0]
     commands = _statements(statements, data, zsh=zsh)

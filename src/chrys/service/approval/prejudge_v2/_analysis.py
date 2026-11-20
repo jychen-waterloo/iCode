@@ -5,6 +5,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tree_sitter import Node
+
+
+def covered(node: Node, data: bytes, blanks: bytes) -> bool:
+    """Require ordered child spans and account for every gap in the parent."""
+    offset = node.start_byte
+    for child in node.children:
+        if (
+            child.is_missing
+            or not offset <= child.start_byte < child.end_byte <= node.end_byte
+            or data[offset : child.start_byte].strip(blanks)
+        ):
+            return False
+        offset = child.end_byte
+    return not data[offset : node.end_byte].strip(blanks)
 
 
 @dataclass(frozen=True, slots=True)
