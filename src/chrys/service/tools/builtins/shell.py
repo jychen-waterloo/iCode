@@ -69,7 +69,13 @@ from chrys.foundation.tool_result_metadata import (
 )
 from chrys.foundation.util.once_close import OnceClose
 from chrys.kernel.tools import SyncToolCancelledAfterCompletion
-from chrys.service.approval.prejudge_v2.execution import ApprovalInvalidatedError, isolated_shell_call
+from chrys.service.approval.prejudge_v2._windows_paths import is_windows_namespace_workdir
+from chrys.service.approval.prejudge_v2.execution import (
+    ApprovalInvalidatedError,
+    isolated_shell_call,
+    powershell_isolated_invocation,
+    powershell_pipe_source,
+)
 from chrys.service.mutations.trace import discard_trace_file, prefix_trace_file, shell_trace_argv
 from chrys.service.tools.approval_targets import (
     CHANGED_AFTER_APPROVAL,
@@ -286,7 +292,7 @@ def _pipefail_args(shell: ShellInfo) -> tuple[str, ...]:
 
 
 def _shell_argv_variants(
-    shell: ShellInfo, command: str, *, startup_args: tuple[str, ...] = ()
+    shell: ShellInfo, command: str, *, startup_args: tuple[str, ...] = (), shell_args: tuple[str, ...] | None = None
 ) -> list[tuple[str, ...]]:
     """Launch argvs to try in order: traced first (when armed), then bare.
 
@@ -296,30 +302,24 @@ def _shell_argv_variants(
     variant must degrade to the bare one: tracing may never change
     user-visible shell behavior.
     """
-    base = (shell.path, *startup_args, *_pipefail_args(shell), *shell.args, command)
+    base = (
+        shell.path,
+        *startup_args,
+        *_pipefail_args(shell),
+        *(shell.args if shell_args is None else shell_args),
+        command,
+    )
     prefix = shell_trace_argv.get()
     if prefix:
         return [(*prefix, *base), base]
     return [base]
 
 
-_POWERSHELL_UTF8_PREAMBLE = "\n".join(
-    (
-        "$__chrysUtf8 = [System.Text.UTF8Encoding]::new($false)",
-        "try {",
-        "  [Console]::InputEncoding = $__chrysUtf8",
-        "  [Console]::OutputEncoding = $__chrysUtf8",
-        "} catch { }",
-        "$OutputEncoding = $__chrysUtf8",
-    )
-)
-
-
 def _prepare_pipe_command(command: str, shell: ShellInfo) -> str:
     """Adjust commands for pipe-based shells before execution."""
     if shell.name not in ("pwsh", "powershell"):
         return command
-    return f"{_POWERSHELL_UTF8_PREAMBLE}\n{command}"
+    return powershell_pipe_source(command)
 
 
 def _shell_launch(
@@ -330,7 +330,11 @@ def _shell_launch(
         payload = _prepare_pipe_command(command, shell) if pipe else command
         return _shell_argv_variants(shell, payload), build_shell_subprocess_env()
     approved.require_launch(shell, command)
-    return _shell_argv_variants(shell, command, startup_args=("--noprofile", "--norc")), approved.environment
+    if shell.name in {"pwsh", "powershell"}:
+        flags, encoded = powershell_isolated_invocation(command, pipe=pipe)
+        return _shell_argv_variants(shell, encoded, shell_args=flags), approved.environment
+    startup = ("-f", "-d", "-o", "noaliases") if shell.name == "zsh" else ("--noprofile", "--norc")
+    return _shell_argv_variants(shell, command, startup_args=startup), approved.environment
 
 
 _READ_CHUNK_BYTES = 64 * 1024
@@ -840,11 +844,16 @@ class ShellTools:
         if workdir is not None and not isinstance(workdir, str):
             return ApprovedTargets()
         try:
-            return ApprovedTargets(cwd=physical_dir(self._command_cwd(workdir)))
+            cwd = self.command_cwd(workdir)
+            if is_windows_namespace_workdir(cwd):
+                # Probing the directory could authenticate to a remote host.
+                return ApprovedTargets()
+            return ApprovedTargets(cwd=physical_dir(cwd))
         except OSError, ValueError:
             return ApprovedTargets()
 
-    def _command_cwd(self, workdir: str | None) -> str:
+    def command_cwd(self, workdir: str | None) -> str:
+        """Resolve the shell workdir lexically, without filesystem probes."""
         return resolve_workspace_path(workdir, base_cwd=self._runtime.cwd) if workdir else self._runtime.cwd
 
     async def _bound_result(
@@ -969,7 +978,7 @@ class ShellTools:
         budget = max(100, max_output_tokens)
         tasks = self._tasks
         approved_shell = isolated_shell_call.get()
-        if approved_shell is not None and not approved_shell.claim(self._shell, command):
+        if approved_shell is not None and not approved_shell.claim(self._shell, command, self.command_cwd(workdir)):
             _record_shell_error()
             return tool_error(
                 "approval_invalidated", "Shell command or launch configuration changed after structured approval."
@@ -991,7 +1000,7 @@ class ShellTools:
             if missing_base is not None:
                 _record_shell_error()
                 return missing_base
-            cwd = self._command_cwd(workdir)
+            cwd = approved_shell.cwd if approved_shell is not None else self.command_cwd(workdir)
             if not os.path.isdir(cwd):
                 _record_shell_error()
                 return _workdir_not_found(cwd, workdir)

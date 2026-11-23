@@ -56,7 +56,13 @@ from chrys.service.approval.arbitration import ApprovalDecisionArbiter, Approval
 from chrys.service.approval.correlation import OneShotCorrelation
 from chrys.service.approval.policy import ApprovalMode
 from chrys.service.approval.prejudge_v2 import Policy, Route, load_policy, route
-from chrys.service.approval.prejudge_v2.execution import isolated_shell_call, prepare_shell, supports_isolated_launch
+from chrys.service.approval.prejudge_v2._windows_paths import is_windows_namespace_workdir
+from chrys.service.approval.prejudge_v2.execution import (
+    exceeds_isolated_launch_limit,
+    isolated_shell_call,
+    prepare_shell,
+    supports_isolated_launch,
+)
 from chrys.service.approval.reuse_binding import ApprovalReuseBinding, PreparedReuse
 from chrys.service.approval.safety_classifier import (
     path_arg_may_access_sensitive_data,
@@ -455,26 +461,39 @@ class ApprovalMiddleware(FunctionMiddleware):
                 # The user's $SHELL is not necessarily the executed dialect.
                 try:
                     observed = route(cmd, tool_name, self._prejudge)
+                    shell_tool = context.function.bound_instance
+                    cwd = None
+                    if isinstance(shell_tool, ShellTools) and isinstance(context.arguments, dict):
+                        workdir = context.arguments.get("workdir")
+                        if workdir is None or isinstance(workdir, str):
+                            cwd = shell_tool.command_cwd(workdir)
+                    unsafe_cwd = cwd is not None and is_windows_namespace_workdir(cwd)
                     sensitive = sensitive_shell or observed.sensitive
                     if mode == "enforce":
                         sensitive_shell = sensitive
                     reason = observed.reason_code
                     if sensitive:
                         reason = "sensitive_target"
+                    elif unsafe_cwd:
+                        reason = "windows_namespace_workdir"
                     elif observed.route is Route.ALLOW:
                         if not policy_requires_approval or dev_sub_agent_review:
                             reason = "ordinary_policy"
                         elif not isinstance(context.arguments, dict):
                             reason = "unsupported_arguments"
                         elif (
-                            not isinstance(shell_tool := context.function.bound_instance, ShellTools)
+                            not isinstance(shell_tool, ShellTools)
                             or shell_tool.shell.name != tool_name
                             or not supports_isolated_launch(shell_tool.shell)
                         ):
                             reason = "unsupported_shell_configuration"
+                        elif cwd is None:
+                            reason = "unsupported_arguments"
+                        elif exceeds_isolated_launch_limit(shell_tool.shell, cmd):
+                            reason = "launch_command_too_long"
                         else:
                             prepared_shell = prepare_shell(
-                                shell_tool.shell, cmd, observed.executables, tuple(self._workspace_roots)
+                                shell_tool.shell, cmd, observed.executables, tuple(self._workspace_roots), cwd=cwd
                             )
                             if prepared_shell is None:
                                 reason = "untrusted_launch_context"

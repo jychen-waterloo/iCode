@@ -1,6 +1,6 @@
 # 结构化 Shell Pre-Judge
 
-iCode 可以使用 Tree-sitter 和字面量 YAML 规则分析 Bash 指令，再进入原有工具审批。功能**默认关闭**，只返回 **ALLOW** 或 **DEFER**：ALLOW 提供快捷自动审批，DEFER 交给原有审批流程；Pre-Judge 本身不拒绝命令。原有 Hook、审批策略、只读快捷审批、DAA（已有授权复用机制）、已记住的授权和**执行前** Shell Command Filter 的行为均保留。
+iCode 可以使用 Tree-sitter 和字面量 YAML 规则分析 Bash、Git Bash、Zsh 和 PowerShell 指令，再进入原有工具审批。功能**默认关闭**，只返回 **ALLOW** 或 **DEFER**。ALLOW 提供快捷自动审批，DEFER 交给原有审批流程。Pre-Judge 本身不会拒绝命令，普通审批和独立的 Shell Command Filter 仍可拒绝执行。
 
 将配置存放在受信任的用户级目录中（macOS/Linux 通常为 `~/.chrys/prejudge.yaml`）。使用该配置目录的所有 Profile 和工作区共享此策略。
 
@@ -38,7 +38,7 @@ rules:
 
 推荐使用 `mode: "off"`、`mode: "shadow"` 或 `mode: "enforce"`。未加引号的 `mode: off`（YAML 将其解析为布尔值 `False`）、`mode: false` 和空文件也会关闭功能，且不会加载 Tree-sitter。`shadow` 只记录建议的 ALLOW/DEFER，不执行快捷审批；`enforce` 执行符合条件的 ALLOW。**YAML 语法本身损坏**时，正常审批启动会报包含文件路径的错误，即使原本意图声明 `shadow`。可正常解析且明确声明 `shadow` 的配置，若规则或依赖无效，会记录含文件路径（和适用时规则 ID）的警告并停止观察；无效的 `enforce` 规则会报包含文件路径和规则 ID 的错误。BYPASS 不会加载或验证 `prejudge.yaml`；如果此会话随后切换到 MANUAL/AUTO，届时才加载配置。
 
-AST Matcher 当前只支持 Bash/Git Bash。zsh、sh、dash、PowerShell、cmd.exe、动态展开、重定向、通配符及多数控制流构造均 DEFER。不支持的 Shell 方言会发出警告，说明结构化 ALLOW 不生效，但原有只读快捷审批仍会应用。例如，zsh 的 `ls` 和 PowerShell 的 `Get-ChildItem` 保留原有只读审批行为。匹配采用字面量命令名，不自动规范化可执行文件路径：`rm` 的规则不会匹配 `/bin/rm`。`command`、`env`、`time` 等包装命令也会 DEFER 到原有审批流程。Pre-Judge 是快捷审批层，不是 Shell 安全边界。
+AST Matcher 支持下表所列 Shell 的静态命令、受支持的管道和独立语句。`sh`、`dash`、`fish` 和 `cmd.exe` 等不支持的 Shell，以及重定向、动态展开、通配符和多数控制流构造均 DEFER。包括 PowerShell 在内，规则始终按字面参数区分大小写。`command`、`env` 和 `time` 等包装命令也会 DEFER。
 
 ### 安装可选解析器
 
@@ -47,20 +47,32 @@ AST Matcher 当前只支持 Bash/Git Bash。zsh、sh、dash、PowerShell、cmd.e
 | 安装方式 | 命令 |
 | --- | --- |
 | 源码检出 | `uv sync --locked`，然后运行 `uv run icode` |
-| uv tool | `uv tool install --reinstall --python 3.14 --with tree-sitter==0.25.1 --with tree-sitter-bash==0.25.1 iCode-TUI` |
-| pipx（已安装 iCode-TUI） | `pipx inject iCode-TUI "tree-sitter==0.25.1" "tree-sitter-bash==0.25.1"` |
+| uv tool | `uv tool install --reinstall --python 3.14 --with tree-sitter==0.25.1 --with tree-sitter-bash==0.25.1 --with tree-sitter-zsh==0.64.3 --with tree-sitter-pwsh==0.38.1 iCode-TUI` |
+| pipx（已安装 iCode-TUI） | `pipx inject iCode-TUI "tree-sitter==0.25.1" "tree-sitter-bash==0.25.1" "tree-sitter-zsh==0.64.3" "tree-sitter-pwsh==0.38.1"` |
 
-在相应环境中运行 `python -c "from importlib.metadata import version; print(version('tree-sitter'), version('tree-sitter-bash'))"` 查看版本。源码检出环境使用 `uv run python`。uv tool 安装可通过 `uv tool dir` 找到 `icode-tui` 环境。pipx 安装可用 `pipx runpip iCode-TUI show tree-sitter tree-sitter-bash`。将 wheel 安装到 Python 环境时，请在同一环境中安装解析器。如果离线包不支持安装解析器，请改用可管理的 Python 环境安装。
+在相应环境中运行 `python -c "from importlib.metadata import version; print([version(p) for p in ('tree-sitter', 'tree-sitter-bash', 'tree-sitter-zsh', 'tree-sitter-pwsh')])"` 查看版本。源码检出环境使用 `uv run python`。uv tool 安装可通过 `uv tool dir` 找到 `icode-tui` 环境。pipx 安装可用 `pipx runpip iCode-TUI show tree-sitter tree-sitter-bash tree-sitter-zsh tree-sitter-pwsh`。将 wheel 安装到 Python 环境时，请在同一环境中安装解析器。如果离线包不支持安装解析器，请改用可管理的 Python 环境安装。缺少可用的 Zsh 或 PowerShell 文法时，相应方言会 DEFER。
 
 ### 隔离启动
 
-符合条件的 Bash 或 Git Bash 调用由配置的 Shell 以 `--noprofile --norc` 执行原始命令。子进程环境移除 `BASH_ENV`、`ENV` 和全部 `BASH_FUNC_*` 项。iCode 同时检查原始文本和解码参数是否涉及敏感目标。当每条命令都匹配规则时，裸命令名、支持的管道或复合语句均可使用快捷审批。
+配置的 Shell 执行获批的原始文本。iCode 同时检查原始文本和解码参数是否涉及敏感目标。受支持的管道或复合语句中，每条命令都必须匹配规则。
 
-普通审批和 BYPASS 保留原有启动设置。依赖继承的 Bash 函数或启动脚本的命令，使用结构化快捷审批时可能表现不同。该快捷审批信任系统启动状态、用户配置的环境、`PATH` 和通过它解析到的可执行文件。使用相对查找路径或位于已知工作区内的可执行文件时会 DEFER。请将可信程序和搜索目录放在 Agent 无法修改的位置。继承状态和外部程序可以独立于工具调用发生变化。即使匹配宽泛规则，`open`、`osascript` 和更改执行状态的 Shell 内建命令也会 DEFER。
+| Shell | 隔离方式与支持的命令名 |
+| --- | --- |
+| Bash / Git Bash | `--noprofile --norc`。子进程环境移除 `BASH_ENV`、`ENV` 和全部 `BASH_FUNC_*` 项。裸命令名可以匹配。 |
+| Zsh | `-f -d -o noaliases`。裸命令名可以匹配。可信的系统级 `zshenv` 仍会运行，且可控制启动设置。 |
+| Windows PowerShell 5.1 与 PowerShell 7+ | `-NoProfile -NonInteractive`。Windows 管道启动会加入普通启动使用的 UTF-8 设置，再使用 `-EncodedCommand` 编码脚本。审批仍绑定原始命令。可解析到的原生 `.exe` 或受支持的模块限定 cmdlet 可以匹配。 |
+
+PowerShell 示例包括 `git.exe status` 和 `Microsoft.PowerShell.Management\Get-ChildItem`。也支持相应 Microsoft 模块中的 `Get-Item`、`Get-Content`、`Select-Object` 和 `Write-Output` 全限定名。未限定的 cmdlet、别名、`git status`、含义不明确的原生命令引号和找不到的可执行文件均 DEFER。
+
+受支持的 PowerShell cmdlet 遇到 `Variable:`、`HKCU:` 和 `Registry::` 等 Provider 路径时会 DEFER。原生可执行文件可以接收 `HEAD:README.md` 或 HTTPS URL 等带冒号的字面量参数。PowerShell 和 Git Bash 遇到解码后的 UNC 或设备路径时均会 DEFER，包括传给原生可执行文件的路径。检查覆盖管道中的每条命令及 Windows Shell 工作目录。`C:\project\notes.txt` 等普通盘符路径仍可匹配。这些路径检查只影响结构化快捷审批的资格，调用继续按原有流程审批，原有敏感目标检查仍然适用。在 Windows 上，编码后的 PowerShell 命令行超出进程长度上限时，以 `reason=launch_command_too_long` 进入 DEFER。
+
+普通审批和 BYPASS 保留原有启动设置。依赖继承的 Bash 函数、通过 Zsh 启动文件加入的 `PATH` 项，或普通 PowerShell 会话中可用模块的命令，使用结构化快捷审批时可能表现不同。该快捷审批信任系统启动状态、继承的环境、`PATH`、`PSModulePath` 和通过它们解析到的程序及模块。使用相对查找路径或落在已知工作区内的可执行文件或模块目录时会 DEFER。请将可信程序、模块和搜索目录放在 Agent 无法修改的位置。检查范围之外的程序和模块可以独立于工具调用发生变化。即使匹配宽泛规则，`open`、`osascript` 和更改执行状态的 Shell 内建命令也会 DEFER。
+
+PowerShell 启动时可自动加入模块搜索目录。即使继承的 `PSModulePath` 没有相关目录，Pre-Judge 也会检查相应版本在 Windows「文档」文件夹下的模块目录。工作区包含该目录，或无法验证启动时的模块搜索路径（例如自定义的 `powershell.config.json`）时，调用会 DEFER。
 
 只要有一个 `PATH` 目录位于工作区内，该启动环境下的命令就无法使用结构化 ALLOW。常见情况包括激活项目的 `.venv`，或以用户主目录作为 iCode 工作区。可在诊断日志中查看 `reason=untrusted_launch_context`。这些调用会继续走普通审批，满足条件时仍可使用原有的只读快捷审批。自定义 Shell 启动参数也可能在执行前触发 DEFER（`reason=unsupported_shell_configuration`）。
 
-`cd` 会改变解析命令和检查敏感目标所用的目录。因此，`cd sub && git status` 这样的复合命令会 DEFER。
+`cd` 会改变解析命令和检查敏感目标所用的目录。因此，`cd sub && git status` 这样的复合命令会 DEFER。Zsh 的 `fc` 能执行历史命令，因此也会 DEFER。
 
 ### 审批及执行边界
 

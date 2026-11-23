@@ -299,7 +299,7 @@ async def test_uncertified_or_sensitive_bash_source_never_reaches_execution(
         assert [entry["status"] for entry in middleware.drain_decisions()] == ["user_rejected"]
 
 
-@pytest.mark.parametrize("changed", ["source", "dialect", "args", "path", "task"])
+@pytest.mark.parametrize("changed", ["source", "dialect", "args", "path", "workdir", "task"])
 async def test_bash_approval_invalidates_when_identity_changes(bash_tool, changed, monkeypatch):
     source = "echo approved-source"
     await _write_policy([{"argv_exact": ["echo", "approved-source"]}])
@@ -325,7 +325,8 @@ async def test_bash_approval_invalidates_when_identity_changes(bash_tool, change
             actual_source = "echo changed-source"
 
         async def launch() -> str:
-            return await target.execute(actual_source, reason="Check authorization binding")
+            workdir = "other-local-directory" if changed == "workdir" else None
+            return await target.execute(actual_source, reason="Check authorization binding", workdir=workdir)
 
         if changed == "task":
             context.result = await asyncio.create_task(launch())
