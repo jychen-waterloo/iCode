@@ -30,7 +30,6 @@ import os
 import struct
 import sys
 import time
-from base64 import b64encode
 from collections import deque
 from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
@@ -70,7 +69,12 @@ from chrys.foundation.tool_result_metadata import (
 )
 from chrys.foundation.util.once_close import OnceClose
 from chrys.kernel.tools import SyncToolCancelledAfterCompletion
-from chrys.service.approval.prejudge_v2.execution import ApprovalInvalidatedError, isolated_shell_call
+from chrys.service.approval.prejudge_v2.execution import (
+    ApprovalInvalidatedError,
+    isolated_shell_call,
+    powershell_isolated_invocation,
+    powershell_pipe_source,
+)
 from chrys.service.mutations.trace import discard_trace_file, prefix_trace_file, shell_trace_argv
 from chrys.service.tools.approval_targets import (
     CHANGED_AFTER_APPROVAL,
@@ -310,23 +314,11 @@ def _shell_argv_variants(
     return [base]
 
 
-_POWERSHELL_UTF8_PREAMBLE = "\n".join(
-    (
-        "$__chrysUtf8 = [System.Text.UTF8Encoding]::new($false)",
-        "try {",
-        "  [Console]::InputEncoding = $__chrysUtf8",
-        "  [Console]::OutputEncoding = $__chrysUtf8",
-        "} catch { }",
-        "$OutputEncoding = $__chrysUtf8",
-    )
-)
-
-
 def _prepare_pipe_command(command: str, shell: ShellInfo) -> str:
     """Adjust commands for pipe-based shells before execution."""
     if shell.name not in ("pwsh", "powershell"):
         return command
-    return f"{_POWERSHELL_UTF8_PREAMBLE}\n{command}"
+    return powershell_pipe_source(command)
 
 
 def _shell_launch(
@@ -336,17 +328,10 @@ def _shell_launch(
     if approved is None:
         payload = _prepare_pipe_command(command, shell) if pipe else command
         return _shell_argv_variants(shell, payload), build_shell_subprocess_env()
-    approved.require_launch(shell.name, command)
+    approved.require_launch(shell, command)
     if shell.name in {"pwsh", "powershell"}:
-        if shell.args not in (["-NoProfile", "-Command"], ["-Command"], ["-c"]):
-            raise ApprovalInvalidatedError("The configured shell arguments changed after structured approval.")
-        encoded = b64encode(command.encode("utf-16-le")).decode("ascii")
-        return (
-            _shell_argv_variants(shell, encoded, shell_args=("-NoProfile", "-NonInteractive", "-EncodedCommand")),
-            approved.environment,
-        )
-    if shell.args != ["-c"]:
-        raise ApprovalInvalidatedError("The configured shell arguments changed after structured approval.")
+        flags, encoded = powershell_isolated_invocation(command, pipe=pipe)
+        return _shell_argv_variants(shell, encoded, shell_args=flags), approved.environment
     startup = ("-f", "-d", "-o", "noaliases") if shell.name == "zsh" else ("--noprofile", "--norc")
     return _shell_argv_variants(shell, command, startup_args=startup), approved.environment
 
@@ -987,9 +972,11 @@ class ShellTools:
         budget = max(100, max_output_tokens)
         tasks = self._tasks
         approved_shell = isolated_shell_call.get()
-        if approved_shell is not None and not approved_shell.claim(self._shell.name, command):
+        if approved_shell is not None and not approved_shell.claim(self._shell, command):
             _record_shell_error()
-            return tool_error("approval_invalidated", "Shell command or dialect changed after structured approval.")
+            return tool_error(
+                "approval_invalidated", "Shell command or launch configuration changed after structured approval."
+            )
         # Validate command against filter policy (if configured); the command
         # this shell is given to stop a background task always passes.
         if self._filter is not None and not (tasks is not None and tasks.is_stop_command(command, self._shell.name)):

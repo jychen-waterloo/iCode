@@ -1,6 +1,6 @@
 # 结构化 Shell Pre-Judge
 
-iCode 可以使用 Tree-sitter 和字面量 YAML 规则分析 Bash、Git Bash、Zsh 和 PowerShell 指令，再进入原有工具审批。功能**默认关闭**，只返回 **ALLOW** 或 **DEFER**。ALLOW 提供快捷自动审批，DEFER 交给原有审批流程。原有 Hook、审批策略、只读快捷审批、DAA（已有授权复用机制）、已记住的授权和**执行前** Shell Command Filter 的行为均保留。
+iCode 可以使用 Tree-sitter 和字面量 YAML 规则分析 Bash、Git Bash、Zsh 和 PowerShell 指令，再进入原有工具审批。功能**默认关闭**，只返回 **ALLOW** 或 **DEFER**。ALLOW 提供快捷自动审批，DEFER 交给原有审批流程。Pre-Judge 本身不会拒绝命令，普通审批和独立的 Shell Command Filter 仍可拒绝执行。
 
 将配置存放在受信任的用户级目录中（macOS/Linux 通常为 `~/.chrys/prejudge.yaml`）。使用该配置目录的所有 Profile 和工作区共享此策略。
 
@@ -60,11 +60,19 @@ AST Matcher 支持下表所列 Shell 的静态命令、受支持的管道和独�
 | --- | --- |
 | Bash / Git Bash | `--noprofile --norc`。子进程环境移除 `BASH_ENV`、`ENV` 和全部 `BASH_FUNC_*` 项。裸命令名可以匹配。 |
 | Zsh | `-f -d -o noaliases`。裸命令名可以匹配。可信的系统级 `zshenv` 仍会运行，且可控制启动设置。 |
-| Windows PowerShell 5.1 与 PowerShell 7+ | `-NoProfile -NonInteractive`。通过 `-EncodedCommand` 传递原始文本。可解析到的原生 `.exe` 或受支持的模块限定 cmdlet 可以匹配。 |
+| Windows PowerShell 5.1 与 PowerShell 7+ | `-NoProfile -NonInteractive`。Windows 管道启动会加入普通启动使用的 UTF-8 设置，再使用 `-EncodedCommand` 编码脚本。审批仍绑定原始命令。可解析到的原生 `.exe` 或受支持的模块限定 cmdlet 可以匹配。 |
 
-PowerShell 示例包括 `git.exe status` 和 `Microsoft.PowerShell.Management\Get-ChildItem`。也支持相应 Microsoft 模块中的 `Get-Item`、`Get-Content`、`Select-Object` 和 `Write-Output` 全限定名。未限定的 cmdlet、别名和 `git status` 均 DEFER。访问 Environment Provider、原生命令引号含义不明确或找不到可执行文件时同样 DEFER。
+PowerShell 示例包括 `git.exe status` 和 `Microsoft.PowerShell.Management\Get-ChildItem`。也支持相应 Microsoft 模块中的 `Get-Item`、`Get-Content`、`Select-Object` 和 `Write-Output` 全限定名。未限定的 cmdlet、别名、`git status`、含义不明确的原生命令引号和找不到的可执行文件均 DEFER。
+
+`Variable:`、`HKCU:` 和 `Registry::` 等 PowerShell Provider 路径会 DEFER。PowerShell 和 Git Bash 也会检查解码后的 UNC 或设备路径，包括以两个反斜杠或两个正斜杠开头的路径。检查覆盖管道中的每条命令。`C:\project\notes.txt` 等普通盘符路径仍可匹配。在 Windows 上，完整的 PowerShell 编码命令行必须符合进程长度上限，超出时以 `reason=launch_command_too_long` 进入 DEFER。
 
 普通审批和 BYPASS 保留原有启动设置。依赖继承的 Bash 函数、通过 Zsh 启动文件加入的 `PATH` 项，或普通 PowerShell 会话中可用模块的命令，使用结构化快捷审批时可能表现不同。该快捷审批信任系统启动状态、继承的环境、`PATH`、`PSModulePath` 和通过它们解析到的程序及模块。使用相对查找路径或落在已知工作区内的可执行文件或模块目录时会 DEFER。请将可信程序、模块和搜索目录放在 Agent 无法修改的位置。检查范围之外的程序和模块可以独立于工具调用发生变化。即使匹配宽泛规则，`open`、`osascript` 和更改执行状态的 Shell 内建命令也会 DEFER。
+
+PowerShell 启动时可自动加入模块搜索目录。即使继承的 `PSModulePath` 没有相关目录，Pre-Judge 也会检查相应版本在 Windows「文档」文件夹下的模块目录。工作区包含该目录，或无法验证启动时的模块搜索路径（例如自定义的 `powershell.config.json`）时，调用会 DEFER。
+
+只要有一个 `PATH` 目录位于工作区内，该启动环境下的命令就无法使用结构化 ALLOW。常见情况包括激活项目的 `.venv`，或以用户主目录作为 iCode 工作区。可在诊断日志中查看 `reason=untrusted_launch_context`。这些调用会继续走普通审批，满足条件时仍可使用原有的只读快捷审批。自定义 Shell 启动参数也可能在执行前触发 DEFER（`reason=unsupported_shell_configuration`）。
+
+`cd` 会改变解析命令和检查敏感目标所用的目录。因此，`cd sub && git status` 这样的复合命令会 DEFER。Zsh 的 `fc` 能执行历史命令，因此也会 DEFER。
 
 ### 审批及执行边界
 
@@ -79,6 +87,8 @@ PowerShell 示例包括 `git.exe status` 和 `Microsoft.PowerShell.Management\Ge
 如果首次切换时策略加载失败，所选的 MANUAL/AUTO 模式仍然生效。TUI 或 ACP 客户端会收到含配置路径的警告。此策略快照停用结构化 ALLOW，原有审批流程及其只读快捷审批继续工作。修复 YAML 或解析器安装后，重启 iCode 即可重试加载。正常启动时，无效的已启用策略会抛出包含路径的错误。
 
 **Shadow 日志。** Shadow 和 enforce 使用相同的资格判断，审批结果保持不变。TUI 用户可在 iCode 配置目录的 `logs/debug.log` 中搜索 `shadow route=`。ACP 的 stderr 不输出 INFO。需要查看 ACP 的 Shadow 判定时，可设置 `CHRYS_OTEL=true`，同时保持遥测端点和敏感数据采集未配置，然后查看会话的 `otel/logs.jsonl`。INFO 记录包含判定、原因、策略及规则 ID 和匹配范围。DEBUG 可能包含最多 512 字符的转义命令预览。无界面 CLI 使用 BYPASS。
+
+INFO 日志的 `policy_candidate` 表示 AST 和 YAML 规则在敏感目标及启动检查之前的结果，`route` 则预测是否能使用结构化快捷审批。`decoded_sensitive_target=true` 表示解码参数检查发现了原始文本检查遗漏的敏感目标。在 enforce 模式下，即使没有 YAML 规则匹配，过去自动运行的调用也可能进入普通审批。原有只读快捷审批和已有授权复用也不会自动通过这次调用。Shadow 会记录该发现，实际审批行为保持原样。
 
 ### 兼容性与当前限制
 

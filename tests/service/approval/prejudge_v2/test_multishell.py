@@ -97,6 +97,29 @@ def test_real_dialects_share_the_same_yaml_rules(tmp_path, dialect, head, other)
 
 
 @pytest.mark.parametrize(
+    ("dialect", "executable", "path"),
+    [
+        ("git_bash", "cat", "C:/fixture/path.txt"),
+        ("powershell", _PS_CHILD_ITEM, r"C:\fixture\path.txt"),
+        ("pwsh", _PS_CHILD_ITEM, r"c:\fixture\path.txt"),
+        ("bash", "cat", "//fixture/local"),
+        ("zsh", "cat", "//fixture/local"),
+    ],
+)
+def test_local_path_arguments_remain_eligible(dialect, executable, path):
+    rule = Rule("fixture", Route.ALLOW, Matcher("argv_first", (executable,)))
+    decision = route(f"{executable} '{path}'", dialect, Policy("enforce", "fixture", (rule,)))
+    assert decision.route is Route.ALLOW
+
+
+def test_zsh_history_builtin_defers_under_matching_policy():
+    rule = Rule("fixture", Route.ALLOW, Matcher("argv_first", ("fc",)))
+    decision = route("fc -l", "zsh", Policy("enforce", "fixture", (rule,)))
+    assert decision.route is Route.DEFER
+    assert decision.reason_code == "unresolved_executable"
+
+
+@pytest.mark.parametrize(
     "command",
     [
         '"/usr/bin/printf" hello',

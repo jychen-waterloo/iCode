@@ -44,6 +44,7 @@ _ZSH_STATEFUL = frozenset(
         "emulate",
         "enable",
         "export",
+        "fc",
         "functions",
         "getopts",
         "hash",

@@ -11,7 +11,9 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import yaml
@@ -26,6 +28,8 @@ from chrys.service.agent_middleware.control import approval as approval_module
 from chrys.service.agent_middleware.control.approval import ApprovalMiddleware
 from chrys.service.approval.policy import ApprovalMode, ApprovalPolicy
 from chrys.service.approval.prejudge_v2 import Route, analyze, load_policy, route
+from chrys.service.approval.prejudge_v2._powershell_paths import module_locations
+from chrys.service.approval.prejudge_v2.execution import exceeds_isolated_launch_limit, powershell_isolated_invocation
 from chrys.service.profiles.agents.schema import ApprovalConfig
 from chrys.service.tools.builtins import shell as shell_module
 from chrys.service.tools.builtins.shell import ShellTools
@@ -35,6 +39,8 @@ require_grammars("tree_sitter", "tree_sitter_bash", "tree_sitter_zsh", "tree_sit
 
 _PS_DIALECTS = ("powershell", "pwsh")
 _GET_CHILD_ITEM = r"Microsoft.PowerShell.Management\Get-ChildItem"
+_GET_ITEM = r"Microsoft.PowerShell.Management\Get-Item"
+_GET_CONTENT = r"Microsoft.PowerShell.Management\Get-Content"
 
 
 def _shell(dialect):
@@ -47,10 +53,15 @@ def _shell(dialect):
 
 @pytest.fixture
 def isolated_home(monkeypatch, tmp_path):
-    for name in ("HOME", "USERPROFILE", "APPDATA", "ZDOTDIR"):
-        monkeypatch.setenv(name, str(tmp_path))
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    work = tmp_path / "workspace"
+    work.mkdir()
+    for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"):
+        monkeypatch.setenv(name, str(home))
+    monkeypatch.setenv("ZDOTDIR", str(work))
     monkeypatch.setenv("ICODE_TEST_LAUNCH_MARKER", "inherited-by-child")
-    return tmp_path
+    return work
 
 
 @pytest.fixture
@@ -67,7 +78,7 @@ def launches(monkeypatch):
     return plans
 
 
-async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False):
+async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False, broad=False, may_launch=True):
     path = get_platform().config_dir / "prejudge.yaml"
     await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
     policy = {
@@ -75,7 +86,12 @@ async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False):
         "mode": mode,
         "policy_id": "native-shell-test",
         "rules": [
-            {"id": f"cmd-{idx}", "effect": "allow", "target": "command", "match": {"argv_exact": list(unit)}}
+            {
+                "id": f"cmd-{idx}",
+                "effect": "allow",
+                "target": "command",
+                "match": {"argv_first": [unit[0]]} if broad else {"argv_exact": list(unit)},
+            }
             for idx, unit in enumerate(argv)
         ],
     }
@@ -99,6 +115,8 @@ async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False):
         await bus.publish(ApprovalResponse(request_id=request.request_id, approved=manually_approve))
 
     async def execute() -> None:
+        if not may_launch:
+            pytest.fail("This case must stop before starting a shell")
         context.result = await tools.execute(command=source, reason="Verify a harmless shell launch", timeout=15)
 
     await bus.subscribe(ApprovalRequest, respond)
@@ -191,7 +209,8 @@ async def test_powershell_launches_source_with_isolated_flags(dialect, native, i
         "-NonInteractive",
         "-EncodedCommand",
     )
-    assert base64.b64decode(encoded_source).decode("utf-16-le") == source
+    expected_source = shell_module._prepare_pipe_command(source, shell) if sys.platform == "win32" else source
+    assert base64.b64decode(encoded_source).decode("utf-16-le") == expected_source
     assert ordinary_env["PATH"] == env["PATH"]
     assert env["ICODE_TEST_LAUNCH_MARKER"] == "inherited-by-child"
 
@@ -236,12 +255,183 @@ async def test_workspace_module_path_defers_before_launch(dialect, isolated_home
 
 
 @pytest.mark.parametrize("dialect", _PS_DIALECTS)
-def test_native_powershell_qualifies_the_system_cmdlet(dialect, isolated_home):
+@pytest.mark.parametrize("scope", ["home", "documents"])
+async def test_implicit_user_module_location_defers_before_launch(dialect, scope, isolated_home, caplog, monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows Documents startup paths require the native host")
     shell = _shell(dialect)
+    monkeypatch.delenv("PSModulePath", raising=False)
+    home = Path(os.environ["USERPROFILE"])
+    workspace = home if scope == "home" else home / "Documents"
+    static = ((_GET_CHILD_ITEM, "-LiteralPath", "."),)
+    caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+    for mode in ("shadow", "enforce"):
+        decision, status, _, requests = await _exercise(
+            shell, " ".join(static[0]), static, workspace, mode=mode, may_launch=False
+        )
+        assert decision is Route.ALLOW and status == "user_rejected" and len(requests) == 1
+        assert f"{mode} route=defer reason=untrusted_launch_context" in caplog.text
+
+
+async def test_custom_powershell_module_configuration_defers_before_launch(isolated_home, caplog):
+    shell = _shell("pwsh")
+    locations = module_locations(shell, dict(os.environ))
+    assert locations is not None
+    _, configs = locations
+    home = Path(os.environ["HOME"])
+    (config,) = tuple(path for path in configs if path.is_relative_to(home))
+    await asyncio.to_thread(config.parent.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread(config.write_text, json.dumps({"PSModulePath": str(isolated_home)}), encoding="utf-8")
+    static = ((_GET_CHILD_ITEM, "-LiteralPath", "."),)
+    caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+    for mode in ("shadow", "enforce"):
+        decision, status, _, requests = await _exercise(
+            shell, " ".join(static[0]), static, isolated_home, mode=mode, may_launch=False
+        )
+        assert decision is Route.ALLOW and status == "user_rejected" and len(requests) == 1
+        assert f"{mode} route=defer reason=untrusted_launch_context" in caplog.text
+
+
+@pytest.mark.parametrize("dialect", _PS_DIALECTS)
+@pytest.mark.parametrize(
+    ("name", "literal", "decoded", "reason"),
+    [
+        (_GET_ITEM, r"'hKcU:\Software\Example'", r"hKcU:\Software\Example", "powershell_provider_path"),
+        (_GET_CONTENT, '"Variable:fixture"', "Variable:fixture", "powershell_provider_path"),
+        (_GET_ITEM, "Function:fixture", "Function:fixture", "powershell_provider_path"),
+        (_GET_ITEM, r"CeRt:\CurrentUser", r"CeRt:\CurrentUser", "powershell_provider_path"),
+        (
+            _GET_ITEM,
+            r"'Registry::HKEY_CURRENT_USER\Software'",
+            r"Registry::HKEY_CURRENT_USER\Software",
+            "powershell_provider_path",
+        ),
+        (_GET_ITEM, "WSMan:fixture", "WSMan:fixture", "powershell_provider_path"),
+        (_GET_CONTENT, r"'\\fixture.invalid\share\file'", r"\\fixture.invalid\share\file", "windows_namespace_path"),
+        (_GET_CONTENT, '"//fixture.invalid/share/file"', "//fixture.invalid/share/file", "windows_namespace_path"),
+        (_GET_ITEM, r"'\\?\C:\fixture'", r"\\?\C:\fixture", "windows_namespace_path"),
+        (_GET_ITEM, r"'\\.\fixture'", r"\\.\fixture", "windows_namespace_path"),
+    ],
+)
+async def test_unsafe_powershell_arguments_stop_before_execution(
+    dialect, name, literal, decoded, reason, isolated_home, caplog
+):
+    # A configured tool is needed at the middleware boundary. These
+    # classification-only cases must never launch even if a regression occurs.
+    tool_path = sys.executable
+    shell = ShellInfo(dialect, tool_path, ["-Command"])
+    caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+    static = ((name, "-LiteralPath", decoded), (_GET_CHILD_ITEM, "."))
+    source = f"{name} -LiteralPath {literal} | {_GET_CHILD_ITEM} ."
+    for mode in ("shadow", "enforce"):
+        result, status, _, requests = await _exercise(
+            shell, source, static, isolated_home, mode=mode, broad=True, may_launch=False
+        )
+        assert result is Route.DEFER and status == "user_rejected" and len(requests) == 1
+        assert f"{mode} route=defer reason={reason}" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("literal", "decoded"),
+    [
+        ("//fixture.invalid/share/file", "//fixture.invalid/share/file"),
+        (r"'\\fixture.invalid\share\file'", r"\\fixture.invalid\share\file"),
+        (r"'\\?\C:\fixture'", r"\\?\C:\fixture"),
+        (r"'\\.\fixture'", r"\\.\fixture"),
+        ("--path=//fixture.invalid/share/file", "--path=//fixture.invalid/share/file"),
+    ],
+)
+async def test_git_bash_namespace_paths_stop_before_execution(literal, decoded, isolated_home, caplog):
+    shell = ShellInfo("git_bash", sys.executable, ["-c"])
+    source = f"cat {literal} | head"
+    static = (("cat", decoded), ("head",))
+    caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+    # Enforce must also veto a legacy read-only shortcut. Shadow's prediction
+    # can be checked independently without sending this source to any shell.
+    decision, status, _, requests = await _exercise(
+        shell, source, static, isolated_home, mode="enforce", broad=True, may_launch=False
+    )
+    assert decision is Route.DEFER and status == "user_rejected" and len(requests) == 1
+    assert "enforce route=defer reason=windows_namespace_path" in caplog.text
+
+
+@pytest.mark.parametrize("dialect", _PS_DIALECTS)
+@pytest.mark.parametrize("native", [False, True], ids=["cmdlet", "native-stderr"])
+async def test_powershell_pipe_encoding_matches_ordinary_approval(
+    dialect, native, isolated_home, launches, monkeypatch
+):
+    if sys.platform != "win32":
+        pytest.skip("The PowerShell pipe comparison requires Windows")
+    shell = _shell(dialect)
+    text = "ASCII only\n中文\nMixed 汉字 café Ω\n"
+    await asyncio.to_thread((isolated_home / "utf8.txt").write_text, text, encoding="utf-8")
+    if native:
+        await asyncio.to_thread(
+            (isolated_home / "emit.py").write_text,
+            "import sys\nfrom pathlib import Path\n"
+            "sys.stdout.buffer.write(Path('utf8.txt').read_bytes())\n"
+            "sys.stderr.buffer.write('stderr 中文 café Ω'.encode('utf-8'))\n",
+            encoding="utf-8",
+        )
+        python = Path(sys.executable)
+        monkeypatch.setenv("PATH", os.pathsep.join((str(python.parent), os.environ["PATH"])))
+        static = ((python.name, "emit.py"),)
+    else:
+        static = ((_GET_CONTENT, "-Encoding", "UTF8", "-LiteralPath", "utf8.txt"),)
+    source = " ".join(static[0])
+    normal_route, normal_status, normal_output, normal_requests = await _exercise(
+        shell, source, static, isolated_home, mode="shadow", manually_approve=True
+    )
+    decision, status, approved_output, requests = await _exercise(shell, source, static, isolated_home, mode="enforce")
+    assert normal_route is decision is Route.ALLOW
+    assert normal_status == "user_approved" and len(normal_requests) == 1
+    assert status == "prejudge_approved" and not requests
+    assert approved_output == normal_output
+    assert all(line in approved_output for line in text.splitlines())
+    if native:
+        assert "stderr 中文 café Ω" in approved_output
+    (ordinary, _), (isolated, _) = launches
+    assert base64.b64decode(isolated[-1][-1]).decode("utf-16-le") == ordinary[-1][-1]
+    assert ordinary[-1][-1] == shell_module._prepare_pipe_command(source, shell)
+
+
+@pytest.mark.parametrize("dialect", _PS_DIALECTS)
+async def test_powershell_launch_limit_defers_in_both_modes(dialect, isolated_home, caplog):
+    if sys.platform != "win32":
+        pytest.skip("The command line limit applies to the Windows pipe backend")
+    shell = _shell(dialect)
+    prefix = f"{_GET_CONTENT} -LiteralPath "
+    caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+    for length in range(11_000, 13_000):
+        if exceeds_isolated_launch_limit(shell, prefix + "x" * length):
+            break
+    else:
+        pytest.fail("Expected the encoded Windows command line to exceed 32,767 UTF-16 units")
+    short = prefix + "x" * (length - 1)
+    assert not exceeds_isolated_launch_limit(shell, prefix + "sample")
+    assert not exceeds_isolated_launch_limit(shell, short)
+    flags, payload = powershell_isolated_invocation(short, pipe=True)
+    units = len(subprocess.list2cmdline((shell.path, *flags, payload)).encode("utf-16-le")) // 2 + 1
+    assert 32_763 <= units <= 32_767
+    argument = "x" * length
+    static = ((_GET_CONTENT, "-LiteralPath", argument),)
+    for mode in ("shadow", "enforce"):
+        decision, status, _, requests = await _exercise(
+            shell, prefix + argument, static, isolated_home, mode=mode, broad=True, may_launch=False
+        )
+        assert decision is Route.ALLOW and status == "user_rejected" and len(requests) == 1
+        assert f"{mode} route=defer reason=launch_command_too_long" in caplog.text
+
+
+@pytest.mark.parametrize("dialect", _PS_DIALECTS)
+def test_native_powershell_qualifies_the_system_cmdlet(dialect, isolated_home, monkeypatch):
+    shell = _shell(dialect)
+    monkeypatch.delenv("PSModulePath", raising=False)
     source = (
         f"$info = Get-Command -Name {_GET_CHILD_ITEM} -ErrorAction Stop; "
         "@{ Type = [string] $info.CommandType; Module = $info.ModuleName; "
-        "SystemModule = $info.Module.ModuleBase.StartsWith($PSHOME, [StringComparison]::OrdinalIgnoreCase) } "
+        "SystemModule = $info.Module.ModuleBase.StartsWith($PSHOME, [StringComparison]::OrdinalIgnoreCase); "
+        "ModulePath = $env:PSModulePath } "
         "| ConvertTo-Json -Compress"
     )
     encoded = base64.b64encode(source.encode("utf-16-le")).decode("ascii")
@@ -255,8 +445,19 @@ def test_native_powershell_qualifies_the_system_cmdlet(dialect, isolated_home):
         timeout=15,
         **windows_hidden_subprocess_kwargs(),
     )
-    assert json.loads(result.stdout) == {
+    resolution = json.loads(result.stdout)
+    effective = resolution.pop("ModulePath")
+    assert resolution == {
         "Type": "Cmdlet",
         "Module": "Microsoft.PowerShell.Management",
         "SystemModule": True,
     }
+    if sys.platform == "win32":
+        locations = module_locations(shell, dict(os.environ))
+        assert locations is not None
+        predicted, _ = locations
+        edition = "WindowsPowerShell" if dialect == "powershell" else "PowerShell"
+        expected = Path(os.environ["USERPROFILE"]) / "Documents" / edition / "Modules"
+        actual = {Path(item) for item in effective.split(os.pathsep) if item}
+        assert expected in actual
+        assert actual <= {Path(item) for item in predicted}

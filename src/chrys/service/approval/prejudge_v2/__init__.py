@@ -28,6 +28,7 @@ from ._adapters import ADAPTED_DIALECTS, analyze_adapted, explicit_executable
 from ._analysis import Analysis as Analysis
 from ._analysis import CommandNode as CommandNode
 from ._analysis import covered
+from ._windows_paths import unsafe_argument_reason
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,8 @@ class PreJudgeResult:
     analysis_digest: str
     executables: tuple[str, ...] = ()
     sensitive: bool = False
+    decoded_sensitive_target: bool = False
+    policy_candidate: Route = Route.DEFER
 
 
 MatcherField = Literal["argv_exact", "argv_first"]
@@ -574,7 +577,9 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
     spans: list[tuple[int, int]] = []
     all_allowed = analysis.coverage_complete
     reason = analysis.unsupported[0] if analysis.unsupported else "unmatched_unit"
-    sensitive = shell_command_may_access_sensitive_data(command, shell_name=dialect)
+    raw_sensitive = shell_command_may_access_sensitive_data(command, shell_name=dialect)
+    argv_sensitive = False
+    unsafe_path = None
     for node in analysis.executable_nodes:
         if dialect in ADAPTED_DIALECTS and node.argv is not None:
             if _opaque(node.argv):
@@ -592,11 +597,15 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
                 allowed = True
         if not allowed:
             all_allowed = False
-        if node.argv is not None and shell_argv_may_access_sensitive_data(node.argv, shell_name=dialect):
-            sensitive = True
+        if node.argv is not None:
+            if shell_argv_may_access_sensitive_data(node.argv, shell_name=dialect):
+                argv_sensitive = True
+            unsafe_path = unsafe_path or unsafe_argument_reason(node.argv, dialect)
+    policy_candidate = Route.ALLOW if all_allowed else Route.DEFER
+    sensitive = raw_sensitive or argv_sensitive or unsafe_path is not None
     if sensitive:
         all_allowed = False
-        reason = "sensitive_target"
+        reason = "sensitive_target" if raw_sensitive or argv_sensitive else unsafe_path or "sensitive_target"
     return PreJudgeResult(
         Route.ALLOW if all_allowed else Route.DEFER,
         "all_units_allowed" if all_allowed else reason,
@@ -606,4 +615,6 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
         digest,
         tuple(node.argv[0] for node in analysis.executable_nodes if node.argv) if all_allowed else (),
         sensitive,
+        sensitive and not raw_sensitive,
+        policy_candidate,
     )

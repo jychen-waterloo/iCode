@@ -1,6 +1,6 @@
 # Structured Shell Pre-Judge
 
-iCode can optionally inspect Bash, Git Bash, Zsh, and PowerShell commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut; DEFER continues through existing approval. Existing Hooks, approval policy, the read-only shortcut, DAA (the existing authorization-reuse mechanism), remembered grants, and the **pre-execution** Shell Command Filter retain their existing behavior.
+iCode can optionally inspect Bash, Git Bash, Zsh, and PowerShell commands using Tree-sitter and literal YAML rules before ordinary tool approval. It is **off by default** and returns only **ALLOW** or **DEFER**. ALLOW offers an automatic-approval shortcut. DEFER continues through existing approval. Pre-Judge itself does not deny commands. Ordinary approval and the independent Shell Command Filter can still reject a call.
 
 Place `prejudge.yaml` in iCode's trusted user configuration directory (`~/.chrys/prejudge.yaml` on macOS/Linux). The user policy applies across profiles and workspaces using that configuration directory.
 
@@ -60,11 +60,19 @@ The configured shell runs the original approved text. iCode checks the original 
 | --- | --- |
 | Bash / Git Bash | `--noprofile --norc`. The child environment drops `BASH_ENV`, `ENV`, and all `BASH_FUNC_*` entries. Bare names can qualify. |
 | Zsh | `-f -d -o noaliases`. Bare names can qualify. The trusted system `zshenv` still runs and can control startup settings. |
-| Windows PowerShell 5.1 and PowerShell 7+ | `-NoProfile -NonInteractive`. The source is passed unchanged through `-EncodedCommand`. A resolvable native `.exe` or a supported module-qualified cmdlet can qualify. |
+| Windows PowerShell 5.1 and PowerShell 7+ | `-NoProfile -NonInteractive`. The Windows pipe backend adds its normal UTF-8 setup before encoding the script with `-EncodedCommand`. Approval stays bound to the original command. A resolvable native `.exe` or a supported module-qualified cmdlet can qualify. |
 
-PowerShell examples include `git.exe status` and `Microsoft.PowerShell.Management\Get-ChildItem`. Qualified `Get-Item`, `Get-Content`, `Select-Object`, and `Write-Output` are also supported from their Microsoft modules. Unqualified cmdlets, aliases, and `git status` DEFER. PowerShell Environment provider arguments, uncertain native argument quoting, and unresolved applications also DEFER.
+PowerShell examples include `git.exe status` and `Microsoft.PowerShell.Management\Get-ChildItem`. Qualified `Get-Item`, `Get-Content`, `Select-Object`, and `Write-Output` are also supported from their Microsoft modules. Unqualified cmdlets, aliases, `git status`, uncertain native argument quoting, and unresolved applications DEFER.
+
+PowerShell provider paths such as `Variable:`, `HKCU:` and `Registry::` DEFER. PowerShell and Git Bash also DEFER on decoded UNC or device paths such as those beginning with two backslashes or two forward slashes. These checks cover every command in a pipeline. Ordinary drive-letter paths such as `C:\project\notes.txt` can still qualify. On Windows, the full encoded PowerShell launch must fit within the process command-line limit. Longer requests DEFER with `reason=launch_command_too_long`.
 
 Ordinary approval and BYPASS retain their normal launch settings. Identical command text can behave differently when it relies on Bash functions, Zsh startup files that extend `PATH`, or PowerShell modules available in the normal session. The shortcut trusts system startup state, the inherited environment, `PATH`, `PSModulePath`, and the programs and modules they resolve. Relative search entries and recognized executable or module locations inside a known workspace DEFER. Keep trusted search directories and their contents outside locations the agent can change. Programs and modules outside those checks can change independently of the tool call. Opaque carriers such as `open`, `osascript`, and shell builtins that change execution state DEFER even if a broad rule matches.
+
+PowerShell can add module locations at startup. Pre-Judge checks the Windows Documents module directory for the selected edition even when it is missing from the inherited `PSModulePath`. If the workspace includes that directory, or startup search paths cannot be verified, the call DEFERs. This includes a custom `powershell.config.json` that Pre-Judge cannot certify.
+
+If any `PATH` directory is inside a workspace, Structured ALLOW is unavailable for commands using that launch context. This can happen with an activated project `.venv` or when iCode uses your home directory as its workspace. Look for `reason=untrusted_launch_context` in the diagnostics. These calls continue through ordinary approval, including the legacy read-only shortcut when applicable. A custom Shell argument list can also DEFER before execution (`reason=unsupported_shell_configuration`).
+
+`cd` changes the directories used for command resolution and sensitive-target checks. A compound command such as `cd sub && git status` DEFERs for that reason. Zsh's `fc` also DEFERs because it can execute commands from shell history.
 
 ### Approval and execution boundaries
 
@@ -79,6 +87,8 @@ Ordinary approval and BYPASS retain their normal launch settings. Identical comm
 If that first switch fails to load the policy, the requested MANUAL/AUTO mode still takes effect. The TUI or ACP client receives a warning with the configuration path. Structured ALLOW stays disabled for this policy snapshot and ordinary approval, including the read-only shortcut, continues. Fix the YAML or parser installation and restart iCode to retry loading. Invalid enabled policies at ordinary startup raise a path-qualified error.
 
 **Shadow diagnostics.** Shadow uses the same eligibility calculation as enforce mode and leaves approval unchanged. In the TUI, look for `shadow route=` in `logs/debug.log` under the iCode configuration directory. ACP keeps INFO off stderr. To observe ACP Shadow decisions, opt in with `CHRYS_OTEL=true` and leave the telemetry endpoint and sensitive-data collection unset. With local telemetry, look in the session's `otel/logs.jsonl`. INFO includes the decision, reason, policy/rule IDs and matched spans. DEBUG can include an escaped command preview of up to 512 characters. The headless CLI uses BYPASS.
+
+The INFO field `policy_candidate` shows whether the AST and YAML rules qualify before sensitive-target and launch checks. The `route` field predicts the structured shortcut. When `decoded_sensitive_target=true`, the argument check found a target the raw text check missed. In enforce mode that finding can send a call to ordinary approval even if no YAML rule matches and the call previously ran automatically. It also prevents the existing read-only shortcut and remembered authorization from approving that call. Shadow reports the finding and preserves the current approval behavior.
 
 ### Compatibility and limitations
 
