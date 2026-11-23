@@ -64,7 +64,7 @@ AST Matcher 支持下表所列 Shell 的静态命令、受支持的管道和独�
 
 PowerShell 示例包括 `git.exe status` 和 `Microsoft.PowerShell.Management\Get-ChildItem`。也支持相应 Microsoft 模块中的 `Get-Item`、`Get-Content`、`Select-Object` 和 `Write-Output` 全限定名。未限定的 cmdlet、别名、`git status`、含义不明确的原生命令引号和找不到的可执行文件均 DEFER。
 
-`Variable:`、`HKCU:` 和 `Registry::` 等 PowerShell Provider 路径会 DEFER。PowerShell 和 Git Bash 也会检查解码后的 UNC 或设备路径，包括以两个反斜杠或两个正斜杠开头的路径。检查覆盖管道中的每条命令。`C:\project\notes.txt` 等普通盘符路径仍可匹配。在 Windows 上，完整的 PowerShell 编码命令行必须符合进程长度上限，超出时以 `reason=launch_command_too_long` 进入 DEFER。
+`Variable:`、`HKCU:` 和 `Registry::` 等 PowerShell Provider 路径会 DEFER。PowerShell 和 Git Bash 也会检查解码后的 UNC 或设备路径，包括以两个反斜杠或两个正斜杠开头的路径。检查覆盖管道中的每条命令和 Windows Shell 工作目录。`C:\project\notes.txt` 等普通盘符路径仍可匹配。在 Windows 上，完整的 PowerShell 编码命令行必须符合进程长度上限，超出时以 `reason=launch_command_too_long` 进入 DEFER。
 
 普通审批和 BYPASS 保留原有启动设置。依赖继承的 Bash 函数、通过 Zsh 启动文件加入的 `PATH` 项，或普通 PowerShell 会话中可用模块的命令，使用结构化快捷审批时可能表现不同。该快捷审批信任系统启动状态、继承的环境、`PATH`、`PSModulePath` 和通过它们解析到的程序及模块。使用相对查找路径或落在已知工作区内的可执行文件或模块目录时会 DEFER。请将可信程序、模块和搜索目录放在 Agent 无法修改的位置。检查范围之外的程序和模块可以独立于工具调用发生变化。即使匹配宽泛规则，`open`、`osascript` 和更改执行状态的 Shell 内建命令也会 DEFER。
 

@@ -78,7 +78,9 @@ def launches(monkeypatch):
     return plans
 
 
-async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False, broad=False, may_launch=True):
+async def _exercise(
+    shell, source, argv, cwd, *, mode, manually_approve=False, broad=False, may_launch=True, workdir=None
+):
     path = get_platform().config_dir / "prejudge.yaml"
     await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
     policy = {
@@ -108,7 +110,7 @@ async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False, b
         workspace_roots=[str(cwd)],
     )
     requests = []
-    context = FunctionInvocationContext(tool, {"command": source})
+    context = FunctionInvocationContext(tool, {"command": source, "workdir": workdir})
 
     async def respond(request: ApprovalRequest) -> None:
         requests.append(request.request_id)
@@ -117,7 +119,9 @@ async def _exercise(shell, source, argv, cwd, *, mode, manually_approve=False, b
     async def execute() -> None:
         if not may_launch:
             pytest.fail("This case must stop before starting a shell")
-        context.result = await tools.execute(command=source, reason="Verify a harmless shell launch", timeout=15)
+        context.result = await tools.execute(
+            command=source, reason="Verify a harmless shell launch", workdir=workdir, timeout=15
+        )
 
     await bus.subscribe(ApprovalRequest, respond)
     try:
@@ -353,6 +357,30 @@ async def test_git_bash_namespace_paths_stop_before_execution(literal, decoded, 
     )
     assert decision is Route.DEFER and status == "user_rejected" and len(requests) == 1
     assert "enforce route=defer reason=windows_namespace_path" in caplog.text
+
+
+@pytest.mark.parametrize("dialect", ("git_bash", *_PS_DIALECTS))
+async def test_windows_namespace_workdir_defers_without_a_filesystem_probe(dialect, isolated_home, caplog, monkeypatch):
+    if sys.platform != "win32":
+        pytest.skip("Windows working directory path semantics require the native host")
+    shell = ShellInfo(dialect, sys.executable, ["-c"] if dialect == "git_bash" else ["-Command"])
+    executable = "review_fixture_tool" if dialect == "git_bash" else _GET_ITEM
+    static = ((executable, "."),)
+    cwd = r"\\fixture.invalid\share"
+    caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+
+    def forbid_probe(directory: str) -> str:
+        pytest.fail("The approval target probe must never see a UNC working directory")
+
+    monkeypatch.setattr(shell_module, "physical_dir", forbid_probe)
+    tools = ShellTools(SessionEnvironment.capture(), shell=shell)
+    assert tools.approval_targets({"workdir": cwd}).cwd is None
+    for mode in ("shadow", "enforce"):
+        decision, status, _, requests = await _exercise(
+            shell, " ".join(static[0]), static, isolated_home, mode=mode, may_launch=False, workdir=cwd
+        )
+        assert decision is Route.ALLOW and status == "user_rejected" and len(requests) == 1
+        assert f"{mode} route=defer reason=windows_namespace_workdir" in caplog.text
 
 
 @pytest.mark.parametrize("dialect", _PS_DIALECTS)

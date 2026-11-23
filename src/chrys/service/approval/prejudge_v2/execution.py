@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from chrys.foundation.platform.runtime_paths import build_shell_subprocess_env
 from chrys.service.approval.prejudge_v2._powershell_paths import has_custom_module_configuration, module_locations
-from chrys.service.approval.prejudge_v2._windows_paths import is_windows_namespace_path
+from chrys.service.approval.prejudge_v2._windows_paths import is_windows_namespace_path, is_windows_namespace_workdir
 
 if TYPE_CHECKING:
     from chrys.foundation.platform import ShellInfo
@@ -144,6 +144,7 @@ class ApprovedShell:
     native_applications: tuple[str, ...] = ()
     shell_path: str = ""
     shell_args: tuple[str, ...] = ()
+    cwd: str = ""
     active: bool = True
     claimed: bool = False
     issued: bool = False
@@ -156,8 +157,8 @@ class ApprovedShell:
             and (self.shell_path, self.shell_args) == (shell.path, tuple(shell.args))
         )
 
-    def claim(self, shell: ShellInfo, source: str) -> bool:
-        if self.claimed or not self._matches(shell, source):
+    def claim(self, shell: ShellInfo, source: str, cwd: str) -> bool:
+        if self.claimed or not self._matches(shell, source) or cwd != self.cwd:
             return False
         self.claimed = True
         return True
@@ -180,11 +181,16 @@ class ApprovedShell:
 
 
 def prepare_shell(
-    shell: ShellInfo, source: str, executables: tuple[str, ...], roots: tuple[str, ...]
+    shell: ShellInfo, source: str, executables: tuple[str, ...], roots: tuple[str, ...], *, cwd: str
 ) -> ApprovedShell | None:
     """Compute shared Shadow and Enforce eligibility without running a shell."""
     owner = asyncio.current_task()
-    if owner is None or not supports_isolated_launch(shell) or exceeds_isolated_launch_limit(shell, source):
+    if (
+        owner is None
+        or not supports_isolated_launch(shell)
+        or is_windows_namespace_workdir(cwd)
+        or exceeds_isolated_launch_limit(shell, source)
+    ):
         return None
     env = build_shell_subprocess_env()
     dialect = shell.name
@@ -220,6 +226,7 @@ def prepare_shell(
         native_applications=native,
         shell_path=shell.path,
         shell_args=tuple(shell.args),
+        cwd=cwd,
     )
 
 

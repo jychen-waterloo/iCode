@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import sys
 
 _PROVIDER_PREFIX = re.compile(r"^[^:/\\]{2,}:")
 
@@ -12,6 +13,10 @@ _PROVIDER_PREFIX = re.compile(r"^[^:/\\]{2,}:")
 def is_windows_namespace_path(value: str) -> bool:
     value = value.lstrip()
     return len(value) >= 2 and value[0] in "\\/" and value[1] in "\\/"
+
+
+def is_windows_namespace_workdir(cwd: str) -> bool:
+    return sys.platform == "win32" and is_windows_namespace_path(cwd)
 
 
 def unsafe_argument_reason(argv: tuple[str, ...], dialect: str) -> str | None:
