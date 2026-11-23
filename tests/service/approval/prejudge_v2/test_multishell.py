@@ -112,6 +112,33 @@ def test_local_path_arguments_remain_eligible(dialect, executable, path):
     assert decision.route is Route.ALLOW
 
 
+@pytest.mark.parametrize("dialect", _PS_DIALECTS)
+@pytest.mark.parametrize(
+    ("head", "words", "reason"),
+    [
+        ("git.exe", ("show", "HEAD:README.md"), "all_units_allowed"),
+        ("git.exe", ("clone", "https://github.com/a/b"), "all_units_allowed"),
+        ("curl.exe", ("https://example.com",), "all_units_allowed"),
+        ("git.exe", ("show", ".env"), "sensitive_target"),
+        ("git.exe", ("show", "HEAD:.env"), "sensitive_target"),
+        ("git.exe", ("show", "fixture::value"), "all_units_allowed"),
+        ("git.exe", ("show", "//fixture.invalid/share/file"), "windows_namespace_path"),
+        ("git.exe", ("show", r"\\.\fixture"), "windows_namespace_path"),
+    ],
+)
+def test_powershell_native_arguments_keep_their_literal_meaning(dialect, head, words, reason):
+    argv = (head, *words)
+    command = " ".join((head, *(f"'{word}'" for word in words)))
+    assert tuple(node.argv for node in analyze(command, dialect=dialect).executable_nodes) == (argv,)
+    rule = Rule("native", Route.ALLOW, Matcher("argv_exact", argv))
+    result = route(command, dialect, Policy("enforce", "native-paths", (rule,)))
+    assert result.policy_candidate is Route.ALLOW
+    assert result.reason_code == reason
+    assert result.route is (Route.ALLOW if reason == "all_units_allowed" else Route.DEFER)
+    assert result.sensitive is (reason == "sensitive_target")
+    assert result.decoded_sensitive_target is False
+
+
 def test_zsh_history_builtin_defers_under_matching_policy():
     rule = Rule("fixture", Route.ALLOW, Matcher("argv_first", ("fc",)))
     decision = route("fc -l", "zsh", Policy("enforce", "fixture", (rule,)))
@@ -267,7 +294,8 @@ def test_microsoft_parser_agrees_on_native_cst_subset(dialect, tmp_path):
             pytest.fail(f"Windows CI requires {dialect} for the native parser oracle")
         pytest.skip(f"{dialect} is unavailable on this host")
     command = (
-        f'{_PS_CHILD_ITEM} -LiteralPath \'a b.txt\' | Select-Object -First 10; Write-Output "say ""hello"""; git.exe +5'
+        f'{_PS_CHILD_ITEM} -LiteralPath \'a b.txt\' | Select-Object -First 10; Write-Output "say ""hello"""; '
+        "git.exe +5; git.exe show HEAD:README.md; git.exe clone https://github.com/a/b; curl.exe https://example.com"
     )
     analysis = analyze(command, dialect=dialect)
     assert analysis.coverage_complete
@@ -332,7 +360,7 @@ if ($env:ICODE_TEST_NATIVE_NAME) {
         throw 'Expected the test alias to take priority in the modified session'
     }
 }
-& $env:ICODE_TEST_PYTHON -c 'import json,sys; print(json.dumps(sys.argv[1:]))' +5 '+5'
+& $env:ICODE_TEST_PYTHON -c 'import json,sys; print(json.dumps(sys.argv[1:]))' +5 '+5' HEAD:README.md 'https://example.com'
 exit $LASTEXITCODE
 """
     result = subprocess.run(
@@ -355,7 +383,7 @@ exit $LASTEXITCODE
         timeout=15,
         **windows_hidden_subprocess_kwargs(),
     )
-    assert json.loads(result.stdout) == ["+5", "+5"]
+    assert json.loads(result.stdout) == ["+5", "+5", "HEAD:README.md", "https://example.com"]
 
 
 def test_native_zsh_literal_argv_matches_the_certified_subset(tmp_path):

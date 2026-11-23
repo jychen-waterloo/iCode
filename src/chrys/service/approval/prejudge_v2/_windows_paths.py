@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 import sys
 
+from ._adapters import is_supported_powershell_cmdlet
+
 _PROVIDER_PREFIX = re.compile(r"^[^:/\\]{2,}:")
 
 
@@ -23,12 +25,13 @@ def unsafe_argument_reason(argv: tuple[str, ...], dialect: str) -> str | None:
     powershell = dialect in {"powershell", "pwsh"}
     if not powershell and dialect != "git_bash":
         return None
+    check_provider = powershell and is_supported_powershell_cmdlet(argv[0])
     for arg in argv:
         # Native options can carry a path in the same argument.
         value = arg.partition("=")[2] if arg.startswith("-") else ""
         for candidate in (arg, value):
             if is_windows_namespace_path(candidate):
                 return "windows_namespace_path"
-            if powershell and ("::" in candidate or _PROVIDER_PREFIX.match(candidate.lstrip())):
+            if check_provider and ("::" in candidate or _PROVIDER_PREFIX.match(candidate.lstrip())):
                 return "powershell_provider_path"
     return None

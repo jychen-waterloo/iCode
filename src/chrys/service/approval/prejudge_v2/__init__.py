@@ -602,10 +602,13 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
                 argv_sensitive = True
             unsafe_path = unsafe_path or unsafe_argument_reason(node.argv, dialect)
     policy_candidate = Route.ALLOW if all_allowed else Route.DEFER
-    sensitive = raw_sensitive or argv_sensitive or unsafe_path is not None
+    sensitive = raw_sensitive or argv_sensitive
     if sensitive:
         all_allowed = False
-        reason = "sensitive_target" if raw_sensitive or argv_sensitive else unsafe_path or "sensitive_target"
+        reason = "sensitive_target"
+    elif unsafe_path is not None:
+        all_allowed = False
+        reason = unsafe_path
     return PreJudgeResult(
         Route.ALLOW if all_allowed else Route.DEFER,
         "all_units_allowed" if all_allowed else reason,
@@ -615,6 +618,6 @@ def route(command: str, dialect: str, policy: Policy) -> PreJudgeResult:
         digest,
         tuple(node.argv[0] for node in analysis.executable_nodes if node.argv) if all_allowed else (),
         sensitive,
-        sensitive and not raw_sensitive,
+        argv_sensitive and not raw_sensitive,
         policy_candidate,
     )

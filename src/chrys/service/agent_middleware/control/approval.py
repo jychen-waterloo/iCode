@@ -470,13 +470,12 @@ class ApprovalMiddleware(FunctionMiddleware):
                     unsafe_cwd = cwd is not None and is_windows_namespace_workdir(cwd)
                     sensitive = sensitive_shell or observed.sensitive
                     if mode == "enforce":
-                        sensitive_shell = sensitive or unsafe_cwd
+                        sensitive_shell = sensitive
                     reason = observed.reason_code
-                    if unsafe_cwd:
+                    if sensitive:
+                        reason = "sensitive_target"
+                    elif unsafe_cwd:
                         reason = "windows_namespace_workdir"
-                    elif sensitive:
-                        if not observed.sensitive:
-                            reason = "sensitive_target"
                     elif observed.route is Route.ALLOW:
                         if not policy_requires_approval or dev_sub_agent_review:
                             reason = "ordinary_policy"

@@ -291,6 +291,10 @@ def analyze_adapted(data: bytes, *, dialect: str) -> Analysis:
     return Analysis(True, True, tuple(nodes), ())
 
 
+def is_supported_powershell_cmdlet(name: str) -> bool:
+    return name.casefold() in _PS_BUILTIN_CMDLETS
+
+
 def explicit_executable(argv: tuple[str, ...], dialect: str) -> bool:
     """Check literal command forms under isolated startup and trusted search paths."""
     head = argv[0]
@@ -303,7 +307,7 @@ def explicit_executable(argv: tuple[str, ...], dialect: str) -> bool:
 
     # Qualifying one of these known cmdlets also excludes unqualified aliases
     # and functions. Module autoload still relies on the trusted PSModulePath.
-    if head.casefold() in _PS_BUILTIN_CMDLETS:
+    if is_supported_powershell_cmdlet(head):
         return True
 
     # Keep to the common native argument subset across Legacy and Standard

@@ -14,22 +14,30 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import create_autospec
 
 import pytest
 import yaml
 
 from chrys.foundation.events.bus import EventBus
-from chrys.foundation.events.types import ApprovalRequest, ApprovalResponse
+from chrys.foundation.events.types import ApprovalRequest, ApprovalResponse, ApprovalReviewed
 from chrys.foundation.models.session_env import SessionEnvironment
+from chrys.foundation.models.workspace import Workspace
 from chrys.foundation.platform import ShellInfo, get_platform
 from chrys.foundation.platform.process import windows_hidden_subprocess_kwargs
 from chrys.kernel.middleware import FunctionInvocationContext
 from chrys.service.agent_middleware.control import approval as approval_module
 from chrys.service.agent_middleware.control.approval import ApprovalMiddleware
+from chrys.service.approval.judge import ApprovalJudge, JudgeVerdict
 from chrys.service.approval.policy import ApprovalMode, ApprovalPolicy
 from chrys.service.approval.prejudge_v2 import Route, analyze, load_policy, route
 from chrys.service.approval.prejudge_v2._powershell_paths import module_locations
-from chrys.service.approval.prejudge_v2.execution import exceeds_isolated_launch_limit, powershell_isolated_invocation
+from chrys.service.approval.prejudge_v2.execution import (
+    exceeds_isolated_launch_limit,
+    isolated_shell_call,
+    powershell_isolated_invocation,
+)
+from chrys.service.approval.reuse_binding import ApprovalReuseBinding
 from chrys.service.profiles.agents.schema import ApprovalConfig
 from chrys.service.tools.builtins import shell as shell_module
 from chrys.service.tools.builtins.shell import ShellTools
@@ -78,9 +86,7 @@ def launches(monkeypatch):
     return plans
 
 
-async def _exercise(
-    shell, source, argv, cwd, *, mode, manually_approve=False, broad=False, may_launch=True, workdir=None
-):
+async def _write_policy(argv, *, mode, broad=False):
     path = get_platform().config_dir / "prejudge.yaml"
     await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
     policy = {
@@ -98,7 +104,24 @@ async def _exercise(
         ],
     }
     await asyncio.to_thread(path.write_text, yaml.safe_dump(policy), encoding="utf-8")
-    decision = route(source, shell.name, load_policy(path))
+    return load_policy(path)
+
+
+async def _exercise(
+    shell,
+    source,
+    argv,
+    cwd,
+    *,
+    mode,
+    manually_approve=False,
+    broad=False,
+    may_launch=True,
+    workdir=None,
+    execute_stub=None,
+):
+    policy = await _write_policy(argv, mode=mode, broad=broad)
+    decision = route(source, shell.name, policy)
     assert tuple(node.argv for node in analyze(source, dialect=shell.name).executable_nodes) == argv
     tools = ShellTools(replace(SessionEnvironment.capture(), cwd=str(cwd)), shell=shell)
     tool = tools.tools()[0]
@@ -117,6 +140,9 @@ async def _exercise(
         await bus.publish(ApprovalResponse(request_id=request.request_id, approved=manually_approve))
 
     async def execute() -> None:
+        if execute_stub is not None:
+            context.result = execute_stub()
+            return
         if not may_launch:
             pytest.fail("This case must stop before starting a shell")
         context.result = await tools.execute(
@@ -301,7 +327,9 @@ async def test_custom_powershell_module_configuration_defers_before_launch(isola
     ("name", "literal", "decoded", "reason"),
     [
         (_GET_ITEM, r"'hKcU:\Software\Example'", r"hKcU:\Software\Example", "powershell_provider_path"),
+        (_GET_ITEM, r'"hKlM:\Software"', r"hKlM:\Software", "powershell_provider_path"),
         (_GET_CONTENT, '"Variable:fixture"', "Variable:fixture", "powershell_provider_path"),
+        (_GET_CONTENT, "'Variable:it''s'", "Variable:it's", "powershell_provider_path"),
         (_GET_ITEM, "Function:fixture", "Function:fixture", "powershell_provider_path"),
         (_GET_ITEM, r"CeRt:\CurrentUser", r"CeRt:\CurrentUser", "powershell_provider_path"),
         (
@@ -311,6 +339,8 @@ async def test_custom_powershell_module_configuration_defers_before_launch(isola
             "powershell_provider_path",
         ),
         (_GET_ITEM, "WSMan:fixture", "WSMan:fixture", "powershell_provider_path"),
+        (_GET_ITEM, "'EnViRoNmEnT::fixture'", "EnViRoNmEnT::fixture", "sensitive_target"),
+        (_GET_CONTENT, '"eNv:fixture"', "eNv:fixture", "sensitive_target"),
         (_GET_CONTENT, r"'\\fixture.invalid\share\file'", r"\\fixture.invalid\share\file", "windows_namespace_path"),
         (_GET_CONTENT, '"//fixture.invalid/share/file"', "//fixture.invalid/share/file", "windows_namespace_path"),
         (_GET_ITEM, r"'\\?\C:\fixture'", r"\\?\C:\fixture", "windows_namespace_path"),
@@ -332,7 +362,11 @@ async def test_unsafe_powershell_arguments_stop_before_execution(
             shell, source, static, isolated_home, mode=mode, broad=True, may_launch=False
         )
         assert result is Route.DEFER and status == "user_rejected" and len(requests) == 1
-        assert f"{mode} route=defer reason={reason}" in caplog.text
+        (prediction,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith(f"{mode} route=")]
+        assert f"{mode} route=defer reason={reason}" in prediction
+        assert "decoded_sensitive_target=false" in prediction
+        assert decoded not in prediction
+        assert source not in prediction
 
 
 @pytest.mark.parametrize(
@@ -345,18 +379,26 @@ async def test_unsafe_powershell_arguments_stop_before_execution(
         ("--path=//fixture.invalid/share/file", "--path=//fixture.invalid/share/file"),
     ],
 )
-async def test_git_bash_namespace_paths_stop_before_execution(literal, decoded, isolated_home, caplog):
+async def test_git_bash_namespace_paths_preserve_legacy_readonly(literal, decoded, isolated_home, caplog):
     shell = ShellInfo("git_bash", sys.executable, ["-c"])
     source = f"cat {literal} | head"
     static = (("cat", decoded), ("head",))
     caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
-    # Enforce must also veto a legacy read-only shortcut. Shadow's prediction
-    # can be checked independently without sending this source to any shell.
-    decision, status, _, requests = await _exercise(
-        shell, source, static, isolated_home, mode="enforce", broad=True, may_launch=False
-    )
-    assert decision is Route.DEFER and status == "user_rejected" and len(requests) == 1
-    assert "enforce route=defer reason=windows_namespace_path" in caplog.text
+
+    def stub_ordinary_execution():
+        assert isolated_shell_call.get() is None
+        return "ordinary approval reached"
+
+    for mode in ("shadow", "enforce"):
+        decision, status, output, requests = await _exercise(
+            shell, source, static, isolated_home, mode=mode, broad=True, execute_stub=stub_ordinary_execution
+        )
+        assert decision is Route.DEFER and status == "auto_approved" and not requests
+        assert output == "ordinary approval reached"
+        (prediction,) = [r.getMessage() for r in caplog.records if r.getMessage().startswith(f"{mode} route=")]
+        assert f"{mode} route=defer reason=windows_namespace_path" in prediction
+        assert "decoded_sensitive_target=false" in prediction
+        assert decoded not in prediction
 
 
 @pytest.mark.parametrize("dialect", ("git_bash", *_PS_DIALECTS))
@@ -381,6 +423,153 @@ async def test_windows_namespace_workdir_defers_without_a_filesystem_probe(diale
         )
         assert decision is Route.ALLOW and status == "user_rejected" and len(requests) == 1
         assert f"{mode} route=defer reason=windows_namespace_workdir" in caplog.text
+    assert "decoded_sensitive_target=true" not in caplog.text
+    assert cwd not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("dialect", "source", "static", "workdir", "matching", "reason"),
+    [
+        (
+            dialect,
+            "git.exe show HEAD:README.md",
+            ("git.exe", "show", "HEAD:README.md"),
+            None,
+            matching,
+            "ordinary_policy" if matching else "unmatched_unit",
+        )
+        for dialect in _PS_DIALECTS
+        for matching in (False, True)
+    ]
+    + [
+        (
+            "powershell",
+            f"{_GET_ITEM} Variable:fixture",
+            (_GET_ITEM, "Variable:fixture"),
+            None,
+            True,
+            "powershell_provider_path",
+        ),
+        (
+            "git_bash",
+            "fixture echo",
+            ("fixture", "echo"),
+            r"\\fixture.invalid\share",
+            True,
+            "windows_namespace_workdir",
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+async def test_profile_shell_auto_keeps_ordinary_execution(
+    dialect, source, static, workdir, matching, reason, mode, isolated_home, caplog
+):
+    if workdir is not None and sys.platform != "win32":
+        pytest.skip("Windows working directory path semantics require the native host")
+    shell = _shell(dialect) if dialect in _PS_DIALECTS else ShellInfo(dialect, sys.executable, ["-c"])
+    policy = await _write_policy((static,) if matching else (), mode=mode)
+    assert not route(source, dialect, policy).sensitive
+    tool = ShellTools(SessionEnvironment.capture(), shell=shell).tools()[0]
+    bus = EventBus()
+    requests = []
+
+    async def unexpected_request(event: ApprovalRequest) -> None:
+        requests.append(event)
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=False))
+
+    await bus.subscribe(ApprovalRequest, unexpected_request)
+    middleware = ApprovalMiddleware(
+        ApprovalPolicy(ApprovalConfig(default="auto", overrides={"shell": "auto"}), tools=[tool]),
+        bus,
+        approval_mode=ApprovalMode.MANUAL,
+    )
+    calls = []
+
+    async def stub_execution() -> None:
+        assert isolated_shell_call.get() is None
+        calls.append(source)
+
+    try:
+        caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+        await middleware.process(
+            FunctionInvocationContext(tool, {"command": source, "workdir": workdir}), stub_execution
+        )
+        assert not requests
+        assert calls == [source]
+        assert not middleware.drain_decisions()
+        (prediction,) = [r.getMessage() for r in caplog.records if r.name == approval_module._prejudge_logger.name]
+        assert f"{mode} route=defer reason={reason} " in prediction
+        assert "decoded_sensitive_target=false" in prediction
+        assert source not in prediction
+        if workdir:
+            assert workdir not in prediction
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, unexpected_request)
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+@pytest.mark.parametrize("remembered", [False, True], ids=["judge", "remembered-grant"])
+async def test_provider_deferral_preserves_daa_and_auto_judge(mode, remembered, isolated_home, caplog):
+    shell = _shell("pwsh")
+    static = (_GET_ITEM, "Variable:fixture")
+    source = " ".join(static)
+    await _write_policy((static,), mode=mode, broad=True)
+    runtime = SessionEnvironment.capture("provider-fixture", Workspace.from_cwd(str(isolated_home)))
+    tool = ShellTools(runtime, shell=shell).tools()[0]
+    context = FunctionInvocationContext(tool, {"command": source})
+    reuse = ApprovalReuseBinding(runtime, [tool])
+    if remembered:
+        prepared = reuse.prepare(context, reusable=True)
+        assert prepared.candidate is not None
+        assert reuse.service.remember(prepared.candidate, "EXACT_SESSION")
+    judge = create_autospec(ApprovalJudge, instance=True)
+    judge.evaluate.return_value = JudgeVerdict(approved=False, reason="fixture rejection")
+    bus = EventBus()
+    requests = []
+
+    async def record_request(event: ApprovalRequest) -> None:
+        requests.append(event)
+
+    async def reject_review(event: ApprovalReviewed) -> None:
+        await bus.publish(ApprovalResponse(request_id=event.request_id, approved=False))
+
+    await bus.subscribe(ApprovalRequest, record_request)
+    await bus.subscribe(ApprovalReviewed, reject_review)
+    middleware = ApprovalMiddleware(
+        ApprovalPolicy(ApprovalConfig(default="require"), tools=[tool]),
+        bus,
+        reuse=reuse,
+        approval_judge=judge,
+        approval_mode=ApprovalMode.AUTO,
+    )
+    calls = []
+
+    async def stub_execution() -> None:
+        assert isolated_shell_call.get() is None
+        calls.append(source)
+
+    try:
+        caplog.set_level(logging.INFO, logger=approval_module._prejudge_logger.name)
+        await middleware.process(context, stub_execution)
+        (decision,) = middleware.drain_decisions()
+        assert f"{mode} route=defer reason=powershell_provider_path" in caplog.text
+        assert "decoded_sensitive_target=false" in caplog.text
+        if remembered:
+            assert not requests
+            assert calls == [source]
+            assert decision["status"] == "reuse_approved"
+            judge.evaluate.assert_not_awaited()
+        else:
+            (request,) = requests
+            assert request.judging and request.reuse_offer is not None
+            assert not calls
+            assert decision["status"] == "user_rejected"
+            judge.evaluate.assert_awaited_once()
+    finally:
+        await middleware.close()
+        await bus.unsubscribe(ApprovalRequest, record_request)
+        await bus.unsubscribe(ApprovalReviewed, reject_review)
 
 
 @pytest.mark.parametrize("dialect", _PS_DIALECTS)
