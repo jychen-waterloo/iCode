@@ -117,6 +117,8 @@ _SUDO_OPTIONS_WITH_VALUES = frozenset(
 _ENV_OPTIONS_WITH_VALUES = frozenset({"-u", "--unset", "-C", "--chdir"})
 _MAX_SHELL_INDIRECTION_ANALYSIS_CHARS = 8192
 _MAX_SHELL_SENSITIVE_RECURSION = 3
+# Only self-contained integer arithmetic is known not to evaluate child source.
+_LITERAL_ARITHMETIC_RE = re.compile(r"\([ \t]*[0-9]+(?:[ \t]*[+*/%-][ \t]*[0-9]+)*[ \t]*\)")
 _SHELL_BUILTIN_CARRIERS = frozenset({"builtin", "command", "exec"})
 _COMPOUND_HEADS = frozenset(
     {
@@ -267,7 +269,9 @@ def _read_posix_parenthesized_payload(command: str, start: int, *, decoded_carri
     return None
 
 
-def _read_posix_backtick_payload(command: str, start: int, *, decoded_carriers: bool) -> tuple[str, int] | None:
+def _read_posix_backtick_payload(
+    command: str, start: int, *, decoded_carriers: bool, in_double: bool = False
+) -> tuple[str, int] | None:
     """Return payload/end index for a POSIX backtick substitution."""
     escaped = False
     payload: list[str] = []
@@ -275,7 +279,8 @@ def _read_posix_backtick_payload(command: str, start: int, *, decoded_carriers: 
     while index < len(command):
         char = command[index]
         if escaped:
-            if decoded_carriers and char not in "\\$`":
+            if decoded_carriers and char not in "\\$`" and not (in_double and char == '"'):
+                # In a double-quoted backtick substitution, an escaped double quote is also unescaped.
                 payload.append("\\")
             payload.append(char)
             escaped = False
@@ -336,12 +341,16 @@ def _posix_source_parts(command: str, *, decoded_carriers: bool) -> tuple[list[s
         if parenthesized:
             payload = _read_posix_parenthesized_payload(command, index + 2, decoded_carriers=decoded_carriers)
         elif char == "`":
-            payload = _read_posix_backtick_payload(command, index + 1, decoded_carriers=decoded_carriers)
+            payload = _read_posix_backtick_payload(
+                command, index + 1, decoded_carriers=decoded_carriers, in_double=in_double
+            )
         else:
             payload = None
         if payload is not None:
             body, end = payload
-            payloads.append(body)
+            if not (decoded_carriers and command.startswith("$((", index) and _LITERAL_ARITHMETIC_RE.fullmatch(body)):
+                # Nonliteral arithmetic can evaluate substitutions; keep inspecting it as child source.
+                payloads.append(body)
             at_word_start = False
             index = end + 1
             continue
@@ -721,6 +730,38 @@ def _source_payloads_may_access_sensitive_data(
     return None if unresolved else False
 
 
+def _certified_child_source_may_access_sensitive_data(command: str, *, shell_name: str, depth: int) -> bool | None:
+    """Do not trust a negative coarse-lexer result without certified child argv."""
+    if not command.strip(" \t\n"):
+        return False
+
+    try:
+        # Pre-Judge requires this grammar, while legacy inspection stays parser-free.
+        # analyze() does not call the classifier.
+        from chrys.service.approval.prejudge_v2 import analyze
+
+        analysis = analyze(command, dialect=shell_name)
+    except Exception:
+        # A failed boundary check is uncertainty, never a negative finding.
+        return None
+    unresolved = (
+        not analysis.syntax_valid
+        or not analysis.executable_nodes
+        or any(reason != "opaque_carrier" for reason in analysis.unsupported)
+    )
+    for node in analysis.executable_nodes:
+        if node.argv is None:
+            unresolved = True
+            continue
+        classified = _decoded_argv_may_access_sensitive_data(
+            node.argv, shell_name=shell_name, complete=True, depth=depth + 1
+        )
+        if classified is True:
+            return True
+        unresolved |= classified is None
+    return None if unresolved else False
+
+
 def _posix_command_indirection_may_access_sensitive_data(
     command: str, *, shell_name: str, depth: int, decoded_carriers: bool
 ) -> bool | None:
@@ -756,7 +797,15 @@ def _posix_command_indirection_may_access_sensitive_data(
         segments, shell_name=shell_name, decoded_carriers=decoded_carriers, nested_source=depth > 0
     )
     payloads.extend(None if payload is None else (shell_name, payload) for payload in substitutions)
-    return _source_payloads_may_access_sensitive_data(payloads, depth=depth + 1, decoded_carriers=decoded_carriers)
+    classified = _source_payloads_may_access_sensitive_data(
+        payloads, depth=depth + 1, decoded_carriers=decoded_carriers
+    )
+    if classified is False and decoded_carriers and depth > 0 and shell_name in {"bash", "git_bash"}:
+        # shlex is not Bash: redirects and expansions can conceal the actual
+        # executable or split an argument. Require AST evidence for a negative
+        # result in child source; retain confirmed positives and existing uncertainty.
+        return _certified_child_source_may_access_sensitive_data(command, shell_name=shell_name, depth=depth)
+    return classified
 
 
 def _shell_command_may_access_sensitive_data(
@@ -797,6 +846,13 @@ def shell_argv_may_access_sensitive_data(
     argv: tuple[str, ...], *, shell_name: str, complete: bool = True
 ) -> bool | None:
     """Inspect decoded argv, returning None when a carrier's command cannot be located."""
+    return _decoded_argv_may_access_sensitive_data(argv, shell_name=shell_name, complete=complete, depth=1)
+
+
+def _decoded_argv_may_access_sensitive_data(
+    argv: tuple[str, ...], *, shell_name: str, complete: bool, depth: int
+) -> bool | None:
+    """Share the recursion budget with inspection of certified child commands."""
     head = normalize_executable_name(argv[0]) if argv and shell_name in {"bash", "git_bash"} else ""
     if not complete:
         if _is_potential_carrier(head):
@@ -819,7 +875,7 @@ def shell_argv_may_access_sensitive_data(
                 return True
         return _source_payloads_may_access_sensitive_data(
             _posix_shell_payloads((argv,), shell_name=shell_name, decoded_carriers=True),
-            depth=1,
+            depth=depth,
             decoded_carriers=True,
         )
     return False

@@ -14,6 +14,7 @@ from chrys.service.approval.safety_classifier import (
     shell_command_may_access_sensitive_data,
     target_may_access_sensitive_data,
 )
+from tests.support.prejudge import require_grammars
 
 
 @pytest.mark.parametrize(
@@ -104,6 +105,7 @@ from chrys.service.approval.safety_classifier import (
     ],
 )
 def test_certified_argv_keeps_literal_tokens_and_explicit_child_source_distinct(argv, sensitive):
+    require_grammars("tree_sitter", "tree_sitter_bash")
     assert shell_argv_may_access_sensitive_data(argv, shell_name="bash") is sensitive
 
 
@@ -182,11 +184,36 @@ def test_shell_sensitive_analysis_caps_pathological_unclosed_substitutions() -> 
         ("grep -F bash -c printenv README.md", False, False),
         ("echo $(echo $(echo $(echo $(echo fixture))))", None, False),
         ("cat .env", True, True),
+        ('echo "$(xargs -0 bash -c printenv </dev/null)"', True, False),
+        ('echo "$(</dev/null xargs -0 bash -c printenv)"', None, False),
+        ('echo "`xargs -0 bash -c printenv`"', True, False),
+        ('echo "`\\"xargs\\" -0 bash -c printenv`"', True, False),
+        ('echo "$(xargs -n 1 bash -c printenv)"', True, False),
+        ("echo \"$(xargs -n $(printf '%s' 1) bash -c printenv)\"", None, False),
+        ("echo \"$(cat .e'n'v)\"", True, False),
+        ('echo "$((1 + 2))"', False, False),
+        ('echo "$((1 + $(xargs -n 1 bash -c printenv)))"', True, False),
+        ("echo '$((1 + 2))'", False, False),
+        ('echo "$( \t\n )"', False, False),
+        ('echo "$(\u00a0)"', None, False),
     ],
 )
 def test_carrier_aware_prejudge_source_analysis(command, enhanced, legacy, shell_name):
+    require_grammars("tree_sitter", "tree_sitter_bash")
     assert prejudge_source_may_access_sensitive_data(command, shell_name=shell_name) is enhanced
     assert shell_command_may_access_sensitive_data(command, shell_name=shell_name) is legacy
+
+
+def test_uncertified_child_source_preserves_approval_on_parser_failure(monkeypatch):
+    from chrys.service.approval import prejudge_v2
+
+    def failed_analysis(command: str, *, dialect: str):
+        raise ImportError("fixture grammar unavailable")
+
+    monkeypatch.setattr(prejudge_v2, "analyze", failed_analysis)
+    command = 'echo "$(printf fixture)"'
+    assert prejudge_source_may_access_sensitive_data(command, shell_name="bash") is None
+    assert shell_command_may_access_sensitive_data(command, shell_name="bash") is False
 
 
 @pytest.mark.parametrize(

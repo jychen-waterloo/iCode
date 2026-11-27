@@ -583,10 +583,27 @@ async def test_carrier_source_sensitivity_is_enforce_only(monkeypatch, caplog, m
         pytest.param('echo "$(time printenv)"', "echo", "source", id="followup-time"),
         pytest.param('echo "$(x=1 printenv)"', "echo", "source", id="followup-assignment"),
         pytest.param('echo "$( (cat .env) )"', "echo", "unresolved", id="followup-subshell-path"),
+        pytest.param('echo "$(xargs -0 bash -c printenv </dev/null)"', "echo", "source", id="redirect-after"),
+        pytest.param('echo "$(</dev/null xargs -0 bash -c printenv)"', "echo", "unresolved", id="redirect-before"),
+        pytest.param('echo "`xargs -0 bash -c printenv`"', "echo", "source", id="backtick-control"),
+        pytest.param('echo "`\\"xargs\\" -0 bash -c printenv`"', "echo", "source", id="backtick-escaped-quotes"),
+        pytest.param('echo "$(xargs -n 1 bash -c printenv)"', "echo", "source", id="static-option"),
+        pytest.param(
+            "echo \"$(xargs -n $(printf '%s' 1) bash -c printenv)\"", "echo", "unresolved", id="substitution-option"
+        ),
+        pytest.param('echo "$((1 + $(xargs -n 1 bash -c printenv)))"', "echo", "source", id="arithmetic-child"),
     ],
 )
 async def test_reported_substitution_enforces_approval(monkeypatch, caplog, mode, matches, command, head, detected):
     await _assert_carrier_sensitivity(monkeypatch, caplog, mode, matches, command, head, detected)
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "enforce"])
+@pytest.mark.parametrize("matches", [False, True])
+async def test_plain_arithmetic_does_not_require_approval(monkeypatch, caplog, mode, matches):
+    await _assert_carrier_sensitivity(
+        monkeypatch, caplog, mode, matches, 'echo "$((1 + 2))"', "echo", "clear", clear_reason="dynamic_word"
+    )
 
 
 @pytest.mark.parametrize("command", ["(printf fixture)", "{ printf fixture; }"])
@@ -623,7 +640,9 @@ async def test_macos_xargs_case_alias_requires_approval(monkeypatch, caplog, cas
     )
 
 
-async def _assert_carrier_sensitivity(monkeypatch, caplog, mode, matches, command, head, detected):
+async def _assert_carrier_sensitivity(
+    monkeypatch, caplog, mode, matches, command, head, detected, *, clear_reason="opaque_carrier"
+):
     require_grammars("tree_sitter", "tree_sitter_bash")
     rules = (Rule("carrier", Route.ALLOW, Matcher("argv_first", (head,))),) if matches else ()
     policy = Policy(mode, "carrier-policy", rules)
@@ -657,7 +676,7 @@ async def _assert_carrier_sensitivity(monkeypatch, caplog, mode, matches, comman
             assert not middleware.drain_decisions()
             execute.assert_awaited_once()
         if mode != "off":
-            reason = {"unresolved": "unresolved_carrier", "clear": "opaque_carrier"}.get(detected, "sensitive_target")
+            reason = {"unresolved": "unresolved_carrier", "clear": clear_reason}.get(detected, "sensitive_target")
             assert f"{mode} route=defer reason={reason}" in caplog.text
             assert f"decoded_sensitive_target={str(detected == 'decoded').lower()}" in caplog.text
             assert f"unresolved_carrier={str(detected == 'unresolved').lower()}" in caplog.text
